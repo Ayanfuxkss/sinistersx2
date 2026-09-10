@@ -2,3 +2,5 @@ Flask
 instagrapi
 Werkzeug
 gunicorn
+python-dotenv
+resend
