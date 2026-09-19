@@ -1,5 +1,5 @@
 ﻿import json, os, threading, time, collections, random, uuid, urllib.request, urllib.parse, urllib.error, smtplib, secrets
-from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string
+from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string, make_response
 import logging
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -8,8 +8,17 @@ from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, RateLimitError
 from igrapiweb import make_ig_web_socket
 from dotenv import load_dotenv
+from cryptography.fernet import Fernet, InvalidToken
 
 load_dotenv()
+
+DATA_ENCRYPTION_KEY = os.environ.get("DATA_ENCRYPTION_KEY", "").strip()
+if not DATA_ENCRYPTION_KEY:
+    raise RuntimeError("DATA_ENCRYPTION_KEY must be set. Generate it with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"")
+try:
+    _DATA_FERNET = Fernet(DATA_ENCRYPTION_KEY.encode())
+except Exception as exc:
+    raise RuntimeError("DATA_ENCRYPTION_KEY is not a valid Fernet key") from exc
                                                                                              
 BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
 BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "").strip()
@@ -73,10 +82,72 @@ def send_otp_email(to_email, username, otp):
 
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("PANEL_SECRET_KEY", "SINISTERS-SX7-PANEL-SECRET")
 
-PANEL_USERNAME = "SINISTERS"
-PANEL_PASSWORD = "AYAN@2003"
+# Security configuration: all secrets must be supplied through environment variables.
+PANEL_SECRET_KEY = os.environ.get("PANEL_SECRET_KEY", "").strip()
+PANEL_USERNAME = os.environ.get("PANEL_USERNAME", "SINISTERS").strip()
+PANEL_PASSWORD_HASH = os.environ.get("PANEL_PASSWORD_HASH", "").strip()
+if not PANEL_SECRET_KEY or len(PANEL_SECRET_KEY) < 32:
+    raise RuntimeError("PANEL_SECRET_KEY must be set to a random value of at least 32 characters.")
+if not PANEL_PASSWORD_HASH:
+    raise RuntimeError("PANEL_PASSWORD_HASH must be set. Generate it with werkzeug.security.generate_password_hash().")
+app.secret_key = PANEL_SECRET_KEY
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "1").lower() not in ("0", "false", "no"),
+    SESSION_COOKIE_SAMESITE="Lax",
+    MAX_CONTENT_LENGTH=int(os.environ.get("MAX_CONTENT_LENGTH", 2 * 1024 * 1024)),
+)
+
+# Small in-memory rate limiter. For multi-instance deployments, put the same logic
+# behind a shared reverse proxy/Redis rate limiter.
+_rate_lock = threading.Lock()
+_rate_buckets = {}
+def _rate_limit(key, limit, window):
+    now = time.time()
+    with _rate_lock:
+        bucket = _rate_buckets.setdefault(key, [])
+        bucket[:] = [t for t in bucket if now - t < window]
+        if len(bucket) >= limit:
+            return False
+        bucket.append(now)
+        return True
+
+@app.after_request
+def security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cache-Control"] = "no-store" if request.path.startswith("/api/") or request.path in ("/login", "/") else response.headers.get("Cache-Control", "no-cache")
+    return response
+
+@app.before_request
+def request_security_checks():
+    # Reject cross-site state-changing requests. Browser fetch/XHR sends Origin;
+    # normal form navigation sends Referer. Login/registration are intentionally exempt.
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.path not in {"/login", "/register/request-otp", "/register/verify-otp"}:
+        origin = request.headers.get("Origin")
+        referer = request.headers.get("Referer")
+        host = request.host_url.rstrip("/")
+        if origin and origin.rstrip("/") != host:
+            return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
+        if not origin and referer and not referer.startswith(host + "/"):
+            return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
+        if not origin and not referer and request.path.startswith("/api/"):
+            return jsonify({"success": False, "error": "Request origin required"}), 403
+
+    ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+    if request.path == "/login" and request.method == "POST":
+        if not _rate_limit(f"login:{ip}", 10, 300):
+            return render_login("Too many login attempts. Try again later."), 429
+    if request.path == "/register/request-otp" and request.method == "POST":
+        if not _rate_limit(f"otp:{ip}", 5, 900):
+            return jsonify({"success": False, "error": "Too many OTP requests. Try again later."}), 429
+    if request.path == "/register/verify-otp" and request.method == "POST":
+        if not _rate_limit(f"otpverify:{ip}", 10, 900):
+            return jsonify({"success": False, "error": "Too many OTP attempts. Try again later."}), 429
+
                                  
                                                 
                                                                            
@@ -184,9 +255,9 @@ input:focus,textarea:focus,select:focus{border-color:rgba(255,255,255,.55)!impor
 <canvas id="shader-canvas"></canvas>
 <div class="shader-overlay"></div>
 <div class="welcome-content">
-<div class="welcome-kicker">✦ ENTER THE EXPERIENCE ✦</div>
+<div class="welcome-kicker">✦ DOMINATE ✦</div>
 <h1>WELCOME TO<br><span>SINISTERS SX7</span><br>PANEL</h1>
-<p>YOUR CONTROL CENTER</p>
+<p>INSTAGRAM</p>
 </div>
 <button class="scroll-down" type="button" onclick="document.getElementById('login').scrollIntoView({behavior:'smooth',block:'start'})"><span>SCROLL DOWN</span><b>↓</b></button>
 </section>
@@ -370,13 +441,68 @@ DATA_FILE = os.path.join(DATA_DIR, "data.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 data_lock = threading.Lock()
 
+def _enc(value):
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8") if not isinstance(value, str) else value.encode("utf-8")
+    return "enc:" + _DATA_FERNET.encrypt(raw).decode("ascii")
+
+def _dec(value):
+    if not isinstance(value, str) or not value.startswith("enc:"):
+        return value
+    try:
+        raw = _DATA_FERNET.decrypt(value[4:].encode("ascii"))
+        try:
+            return json.loads(raw.decode("utf-8"))
+        except Exception:
+            return raw.decode("utf-8")
+    except InvalidToken as exc:
+        raise RuntimeError("Encrypted data cannot be decrypted. Check DATA_ENCRYPTION_KEY.") from exc
+
+def _protect_data(d):
+    out = json.loads(json.dumps(d))
+    for item in out.get("accounts", {}).values():
+        for key in ("session_id", "csrf_token"):
+            if item.get(key) and not str(item[key]).startswith("enc:"):
+                item[key] = _enc(str(item[key]))
+        if item.get("session_settings") and not (isinstance(item["session_settings"], str) and item["session_settings"].startswith("enc:")):
+            item["session_settings"] = _enc(item["session_settings"])
+    for item in out.get("gc_creator_ids", {}).values():
+        if item.get("session_id") and not str(item["session_id"]).startswith("enc:"):
+            item["session_id"] = _enc(str(item["session_id"]))
+        if item.get("session_settings") and not (isinstance(item["session_settings"], str) and item["session_settings"].startswith("enc:")):
+            item["session_settings"] = _enc(item["session_settings"])
+    return out
+
+def _unprotect_data(d):
+    for item in d.get("accounts", {}).values():
+        for key in ("session_id", "csrf_token", "session_settings"):
+            if key in item and item.get(key):
+                item[key] = _dec(item[key])
+    for item in d.get("gc_creator_ids", {}).values():
+        for key in ("session_id", "session_settings"):
+            if key in item and item.get(key):
+                item[key] = _dec(item[key])
+    return d
+
 def load_data():
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE) as f: return json.load(f)
+        with open(DATA_FILE, encoding="utf-8") as f:
+            return _unprotect_data(json.load(f))
     return {"accounts": {}, "users": {}, "gc_creator_ids": {}}
 
 def save_data(d):
-    with open(DATA_FILE, "w") as f: json.dump(d, f, indent=2)
+    protected = _protect_data(d)
+    tmp = DATA_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(protected, f, indent=2)
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, DATA_FILE)
+    try:
+        os.chmod(DATA_FILE, 0o600)
+    except OSError:
+        pass
 
 
 def current_owner():
@@ -2072,8 +2198,10 @@ function openEditModal(id) {
   handleMethodChange();
   document.getElementById('f-message-mode').value = acc.message_mode || 'SINISTERS';
   document.getElementById('f-target-name').value = acc.target_name || '';
-  document.getElementById('f-sid').value = acc.session_id || '';
-  document.getElementById('f-csrf').value = acc.csrf_token || '';
+  document.getElementById('f-sid').value = '';
+  document.getElementById('f-sid').placeholder = acc.session_id_set ? 'Session ID already saved — leave blank to keep it' : 'Session ID';
+  document.getElementById('f-csrf').value = '';
+  document.getElementById('f-csrf').placeholder = acc.csrf_token_set ? 'CSRF token already saved — leave blank to keep it' : 'csrftoken';
   document.getElementById('f-proxy').value = acc.proxy || '';
     document.getElementById('f-msg-min').value = acc.msg_delay_min || '2';
   document.getElementById('f-msg-max').value = acc.msg_delay_max || '5';
@@ -2142,6 +2270,7 @@ async function saveAccount() {
   if (!body.name) { alert('Enter ID name'); return; }
   if (isMultiMethod() && selectedGCs.length === 0) { alert('Select at least one GC'); return; }
   if (editingId && !body.session_id) delete body.session_id;
+  if (editingId && !body.csrf_token) delete body.csrf_token;
 
   const url    = editingId ? `/api/accounts/${editingId}` : '/api/accounts';
   const method = editingId ? 'PUT' : 'POST';
@@ -2654,6 +2783,22 @@ document.getElementById('modal').addEventListener('click', function(e) {
 })();
 </script>
 
+
+<script>
+(function(){
+  const nativeFetch = window.fetch;
+  window.fetch = function(input, init){
+    init = init || {};
+    const method = String(init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const h = new Headers(init.headers || {});
+      h.set('X-Requested-With', 'XMLHttpRequest');
+      init.headers = h;
+    }
+    return nativeFetch.call(this, input, init);
+  };
+})();
+</script>
 </body>
 </html>"""
 
@@ -2679,7 +2824,8 @@ def login_page():
         password = request.form.get("password") or ""
 
         if mode == "admin":
-            if username == PANEL_USERNAME and password == PANEL_PASSWORD:
+            if username == PANEL_USERNAME and check_password_hash(PANEL_PASSWORD_HASH, password):
+                session.clear()
                 session["panel_logged_in"] = True
                 session["login_role"] = "admin"
                 session["login_username"] = PANEL_USERNAME
@@ -2690,6 +2836,7 @@ def login_page():
                 d = load_data()
                 user = d.get("users", {}).get(username)
             if user and check_password_hash(user.get("password_hash", ""), password):
+                session.clear()
                 session["panel_logged_in"] = True
                 session["login_role"] = "user"
                 session["login_username"] = username
@@ -2735,7 +2882,7 @@ def request_registration_otp():
         otp = f"{secrets.randbelow(1000000):06d}"
         pending_registrations[session_key] = {
             "username": username, "password_hash": generate_password_hash(password), "email": email,
-            "otp": otp, "sent_at": now, "expires_at": now + OTP_EXPIRY_SECONDS
+            "otp": otp, "sent_at": now, "expires_at": now + OTP_EXPIRY_SECONDS, "attempts": 0
         }
 
     try:
@@ -2743,7 +2890,7 @@ def request_registration_otp():
     except Exception as e:
         with otp_lock:
             pending_registrations.pop(session_key, None)
-        return jsonify({"success": False, "error": f"Could not send OTP: {e}"}), 500
+        return jsonify({"success": False, "error": "Could not send OTP. Please try again later."}), 502
 
     return jsonify({"success": True, "message": "OTP sent to your email"})
 
@@ -2765,6 +2912,17 @@ def verify_registration_otp():
         with otp_lock:
             pending_registrations.pop(session_key, None)
         return jsonify({"success": False, "error": "OTP expired. Request a new OTP."}), 400
+    with otp_lock:
+        pending = pending_registrations.get(session_key)
+        if pending:
+            pending["attempts"] = int(pending.get("attempts", 0)) + 1
+            attempts = pending["attempts"]
+        else:
+            attempts = 0
+    if attempts > 5:
+        with otp_lock:
+            pending_registrations.pop(session_key, None)
+        return jsonify({"success": False, "error": "Too many invalid OTP attempts. Request a new OTP."}), 429
     if not secrets.compare_digest(otp, pending["otp"]):
         return jsonify({"success": False, "error": "Invalid OTP"}), 400
 
@@ -3039,6 +3197,22 @@ document.addEventListener('click',function(e){
  if(menu.classList.contains('open') && !menu.contains(e.target) && !btn.contains(e.target)) menu.classList.remove('open');
 });
 </script>
+
+<script>
+(function(){
+  const nativeFetch = window.fetch;
+  window.fetch = function(input, init){
+    init = init || {};
+    const method = String(init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const h = new Headers(init.headers || {});
+      h.set('X-Requested-With', 'XMLHttpRequest');
+      init.headers = h;
+    }
+    return nativeFetch.call(this, input, init);
+  };
+})();
+</script>
 </body>
 </html>"""
 
@@ -3211,6 +3385,22 @@ linear-gradient(180deg,#050608,#0a0b0e)}
   }
 })();
 </script>
+
+<script>
+(function(){
+  const nativeFetch = window.fetch;
+  window.fetch = function(input, init){
+    init = init || {};
+    const method = String(init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const h = new Headers(init.headers || {});
+      h.set('X-Requested-With', 'XMLHttpRequest');
+      init.headers = h;
+    }
+    return nativeFetch.call(this, input, init);
+  };
+})();
+</script>
 </body>
 </html>"""
 
@@ -3245,6 +3435,22 @@ CONTACT_HTML = r"""<!DOCTYPE html>
   </section>
 </div>
 <nav class="nav"><a href="/"><span class="sym">⌂</span>HOME</a><a href="/instagram"><span class="sym">◎</span>INSTAGRAM</a><a class="active" href="/contact"><span class="sym">✉</span>CONTACT</a></nav>
+
+<script>
+(function(){
+  const nativeFetch = window.fetch;
+  window.fetch = function(input, init){
+    init = init || {};
+    const method = String(init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const h = new Headers(init.headers || {});
+      h.set('X-Requested-With', 'XMLHttpRequest');
+      init.headers = h;
+    }
+    return nativeFetch.call(this, input, init);
+  };
+})();
+</script>
 </body>
 </html>"""
 
@@ -3463,7 +3669,8 @@ function openEditModal(id){
   editingId=id;
   document.getElementById('idTitle').textContent='EDIT GC CREATOR ID';
   document.getElementById('idName').value=x.name||'';
-  document.getElementById('idSession').value=x.session_id||'';
+  document.getElementById('idSession').value='';
+  document.getElementById('idSession').placeholder=x.session_id_set?'Session ID already saved — leave blank to keep it':'Session ID';
   document.getElementById('idProxy').value=x.proxy||'';
   document.getElementById('idStatus').textContent='';
   document.getElementById('saveIdBtn').disabled=false;
@@ -3771,16 +3978,42 @@ loadIds();
   addEventListener('beforeunload',()=>cancelAnimationFrame(raf));
 })();
 </script>
+
+<script>
+(function(){
+  const nativeFetch = window.fetch;
+  window.fetch = function(input, init){
+    init = init || {};
+    const method = String(init.method || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+      const h = new Headers(init.headers || {});
+      h.set('X-Requested-With', 'XMLHttpRequest');
+      init.headers = h;
+    }
+    return nativeFetch.call(this, input, init);
+  };
+})();
+</script>
 </body>
 </html>"""
 
 
 @app.route("/data")
-@login_required
+@admin_required
 def data_page():
+    # Never expose stored Instagram credentials/session settings through this endpoint.
     with data_lock:
         d = load_data()
-    return jsonify(d)
+        safe = {"users": {}, "accounts": {}, "gc_creator_ids": {}}
+        for u, item in d.get("users", {}).items():
+            safe["users"][u] = {"email": item.get("email", ""), "created_at": item.get("created_at", "")}
+        for aid, item in d.get("accounts", {}).items():
+            safe["accounts"][aid] = {k: item.get(k, "") for k in ("name", "method", "owner", "groups", "group_names")}
+            safe["accounts"][aid]["session_id_set"] = bool(item.get("session_id"))
+        for gid, item in d.get("gc_creator_ids", {}).items():
+            safe["gc_creator_ids"][gid] = {"name": item.get("name", ""), "owner": item.get("owner", ""), "proxy": item.get("proxy", "")}
+            safe["gc_creator_ids"][gid]["session_id_set"] = bool(item.get("session_id"))
+    return jsonify(safe)
 
 
 @app.route("/gc-creator")
@@ -3865,8 +4098,8 @@ def get_accounts():
             "method":         acc.get("method", "INSTAGRAPI"),
             "message_mode":   acc.get("message_mode", "SINISTERS"),
             "target_name":    acc.get("target_name", ""),
-            "session_id":     acc.get("session_id", ""),
-            "csrf_token":     acc.get("csrf_token", ""),
+            "session_id_set": bool(acc.get("session_id")),
+            "csrf_token_set": bool(acc.get("csrf_token")),
             "proxy":          acc.get("proxy", ""),
             "groups":         acc.get("groups", ""),
             "group_names":    acc.get("group_names", ""),
@@ -4072,7 +4305,7 @@ def get_gc_creator_ids():
         else:
             owner = current_owner()
             visible = {k: v for k, v in ids.items() if v.get("owner") == owner}
-    return jsonify({k: {"name": v.get("name", ""), "session_id": v.get("session_id", ""), "proxy": v.get("proxy", "")} for k, v in visible.items()})
+    return jsonify({k: {"name": v.get("name", ""), "session_id_set": bool(v.get("session_id")), "proxy": v.get("proxy", "")} for k, v in visible.items()})
 
 @app.route("/api/gc-creator/ids", methods=["POST"])
 @login_required
@@ -4239,7 +4472,7 @@ def fetch_groups():
 
         return jsonify({
             "success": False,
-            "error": str(e)
+            "error": "Could not fetch groups. Check the credentials and try again."
         }), 400
 
 
