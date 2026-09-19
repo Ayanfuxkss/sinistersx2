@@ -1,6 +1,6 @@
 Flask
 instagrapi
-Werkzeug
-gunicorn
+igrapiweb
 python-dotenv
-resend
+cryptography
+Werkzeug

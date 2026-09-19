@@ -1,23 +1,85 @@
-﻿import json, os, threading, time, collections, random, uuid, urllib.request, urllib.parse, smtplib, secrets
+﻿import json, os, threading, time, collections, random, uuid, urllib.request, urllib.parse, urllib.error, smtplib, secrets
 from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string
 import logging
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
 from email.message import EmailMessage
 from instagrapi import Client
-import resend
+from instagrapi.exceptions import LoginRequired, RateLimitError
+from igrapiweb import make_ig_web_socket
 from dotenv import load_dotenv
 
 load_dotenv()
+                                                                                             
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
+BREVO_SENDER_EMAIL = os.getenv("BREVO_SENDER_EMAIL", "").strip()
+BREVO_SENDER_NAME = os.getenv("BREVO_SENDER_NAME", "SINISTERS SX7").strip()
+
+def send_otp_email(to_email, username, otp):
+    if not BREVO_API_KEY:
+        raise RuntimeError("BREVO_API_KEY is not configured.")
+    if not BREVO_SENDER_EMAIL:
+        raise RuntimeError("BREVO_SENDER_EMAIL is not configured.")
+
+    payload = {
+        "sender": {"name": BREVO_SENDER_NAME, "email": BREVO_SENDER_EMAIL},
+        "to": [{"email": to_email, "name": username}],
+        "subject": "SINISTERS SX7 • Registration OTP",
+        "textContent": (
+            f"Hello {username},\n\n"
+            f"Your SINISTERS SX7 registration OTP is: {otp}\n\n"
+            f"This OTP expires in {OTP_EXPIRY_SECONDS // 60} minutes.\n"
+            "If you did not request this, you can ignore this email.\n\n"
+            "SINISTERS SX7"
+        ),
+        "htmlContent": f"""
+        <div style="font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:24px">
+          <h2>SINISTERS SX7</h2>
+          <p>Hello {username},</p>
+          <p>Your registration OTP is:</p>
+          <div style="font-size:32px;font-weight:700;letter-spacing:8px;
+                      margin:20px 0;padding:16px;border:1px solid #ddd;
+                      border-radius:10px;text-align:center">{otp}</div>
+          <p>This code expires in {OTP_EXPIRY_SECONDS // 60} minutes.</p>
+          <p>If you did not request this, you can ignore this email.</p>
+        </div>
+        """
+    }
+
+    req = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "accept": "application/json",
+            "api-key": BREVO_API_KEY,
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            if not 200 <= response.status < 300:
+                raise RuntimeError(
+                    f"Brevo email error (HTTP {response.status}): {body}"
+                )
+            return json.loads(body) if body else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Brevo email error (HTTP {e.code}): {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Brevo connection error: {e.reason}") from e
+
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET_KEY", "SINISTERS-SX7-PANEL-SECRET")
 
 PANEL_USERNAME = "SINISTERS"
 PANEL_PASSWORD = "AYAN@2003"
-# Email OTP registration settings
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-RESEND_FROM = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
+                                 
+                                                
+                                                                           
 OTP_EXPIRY_SECONDS = int(os.environ.get("OTP_EXPIRY_SECONDS", "600"))
 OTP_RESEND_SECONDS = int(os.environ.get("OTP_RESEND_SECONDS", "60"))
 otp_lock = threading.Lock()
@@ -88,7 +150,7 @@ input::placeholder{color:rgba(255,255,255,.28)}input:focus{border-color:rgba(255
 .error{min-height:18px;margin-top:13px;text-align:center;color:#ff8585;font-size:10px}
 @media(max-width:600px){.welcome-content h1{font-size:clamp(30px,9vw,48px);letter-spacing:1px}.welcome-kicker{letter-spacing:3px}.welcome-content p{letter-spacing:4px}.moon-login{height:210px;margin-bottom:0}.login-wrap{width:min(340px,84vw)}.auth-card{padding:20px;border-radius:18px}.tabs{gap:3px}}
 
-/* LIQUID GLASS + ATC SHADER BACKDROP */
+
 #atc-background{position:fixed;inset:0;width:100%;height:100%;z-index:0;display:block;background:#000;pointer-events:none}
 #atc-glass-tint{position:fixed;inset:0;z-index:1;pointer-events:none;background:radial-gradient(circle at 50% 0%,rgba(255,255,255,.08),transparent 35%),linear-gradient(180deg,rgba(0,0,0,.12),rgba(0,0,0,.48))}
 .shell{position:relative;z-index:2}
@@ -96,7 +158,7 @@ input::placeholder{color:rgba(255,255,255,.28)}input:focus{border-color:rgba(255
 background:linear-gradient(135deg,rgba(255,255,255,.105),rgba(255,255,255,.035))!important;
 border:1px solid rgba(255,255,255,.16)!important;
 box-shadow:0 20px 55px rgba(0,0,0,.30),inset 0 1px 0 rgba(255,255,255,.16),inset 0 -1px 0 rgba(255,255,255,.035)!important;
-backdrop-filter:blur(22px) saturate(135%)!important;-webkit-backdrop-filter:blur(22px) saturate(135%)!important;
+backdrop-filter:blur(12px) saturate(125%)!important;-webkit-backdrop-filter:blur(12px) saturate(125%)!important;
 }
 body{background:#000!important}
 .sidebar{background:linear-gradient(180deg,rgba(10,10,14,.70),rgba(5,5,8,.42))!important}
@@ -199,7 +261,7 @@ input:focus,textarea:focus,select:focus{border-color:rgba(255,255,255,.55)!impor
  }
  </script>
 <script>
-/* Starship shader — standalone WebGL2 adaptation of the supplied React component. */
+
 (function(){
 const canvas=document.getElementById('shader-canvas'); if(!canvas)return;
 const gl=canvas.getContext('webgl2',{premultipliedAlpha:false,antialias:false}); if(!gl)return;
@@ -217,7 +279,7 @@ vec4 O_color;
 void mainImage(out vec4 O, vec2 I){
 vec2 r=iResolution.xy,p=(I+I-r)/r.y*mat2(3.,4.,4.,-3.)/1e2;
 vec4 S=vec4(0.0),C=vec4(1.,2.,3.,0.),W;
-for(float t=iTime,T=.1*t+p.y,i=0.;i<50.;i+=1.){
+for(float t=iTime,T=.1*t+p.y,i=0.;i<28.;i+=1.){
 S+=(cos(W=sin(i)*C)+1.)*exp(sin(i+i*T))/length(max(p,p/vec2(2.0,texture(iChannel0,p/exp(W.x)+vec2(i,t)/8.).r*40.)))/1e4;
 p+=.02*cos(i*(C.xz+8.0+i)+T+T);
 }
@@ -231,14 +293,14 @@ const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.
 const tw=256,th=256,data=new Uint8Array(tw*th*4);for(let i=0;i<data.length;i++)data[i]=Math.floor(Math.random()*256);
 const tex=gl.createTexture();gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tex);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,tw,th,0,gl.RGBA,gl.UNSIGNED_BYTE,data);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
 const uRes=gl.getUniformLocation(prog,'iResolution'),uTime=gl.getUniformLocation(prog,'iTime'),uTex=gl.getUniformLocation(prog,'iChannel0');gl.uniform1i(uTex,0);
-function resize(){const dpr=Math.max(1,Math.min(2,devicePixelRatio||1)),w=Math.floor(canvas.clientWidth*dpr),h=Math.floor(canvas.clientHeight*dpr);if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}gl.viewport(0,0,w,h);gl.uniform2f(uRes,w,h)}
+function resize(){const dpr=Math.min(1.25,Math.max(1,devicePixelRatio||1)),w=Math.floor(canvas.clientWidth*dpr),h=Math.floor(canvas.clientHeight*dpr);if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}gl.viewport(0,0,w,h);gl.uniform2f(uRes,w,h)}
 addEventListener('resize',resize,{passive:true});resize();let raf=0,t0=performance.now();
-function draw(){gl.uniform1f(uTime,(performance.now()-t0)/1000);gl.drawArrays(gl.TRIANGLES,0,6);raf=requestAnimationFrame(draw)}draw();
+let lastFrame=0;const frameInterval=1000/30;function draw(now=performance.now()){if(now-lastFrame>=frameInterval){lastFrame=now;gl.uniform1f(uTime,(now-t0)/1000);gl.drawArrays(gl.TRIANGLES,0,6)}raf=requestAnimationFrame(draw)}draw();
 addEventListener('beforeunload',()=>cancelAnimationFrame(raf));
 })();
 </script>
 <script>
-/* Small lunar display retained as the visual accent above the login form. */
+
 (function(){
 const canvas=document.getElementById('moon-canvas');if(!canvas||!window.THREE)return;
 })();
@@ -246,7 +308,7 @@ const canvas=document.getElementById('moon-canvas');if(!canvas||!window.THREE)re
 {% if error %}<script>window.scrollTo({top:document.getElementById('login').offsetTop,behavior:'instant'});</script>{% endif %}
 
 <script>
-/* ATC shader background — standalone WebGL2 adaptation of the supplied component. */
+
 (function(){
 const canvas=document.getElementById('atc-background');if(!canvas)return;
 const gl=canvas.getContext('webgl2',{premultipliedAlpha:false,antialias:false});if(!gl)return;
@@ -264,7 +326,7 @@ vec4 tanh4(vec4 v){return vec4(tanh1(v.x),tanh1(v.y),tanh1(v.z),tanh1(v.w));}
 void main(){
 vec3 FC=vec3(gl_FragCoord.xy,0.0);vec3 r=vec3(u_res,max(u_res.x,u_res.y));float t=u_time;
 vec4 o=vec4(0.0);vec3 p=vec3(0.0);vec3 v=vec3(1.0,2.0,6.0);float i=0.0,z=1.0,d=1.0,f=1.0;
-for(;i++<5e1;o.rgb+=(cos((p.x+z+v)*0.1)+1.0)/d/f/z){
+for(;i++<28.0;o.rgb+=(cos((p.x+z+v)*0.1)+1.0)/d/f/z){
 p=z*normalize(FC*2.0-r.xyy);
 vec4 m=cos((p+sin(p)).y*0.4+vec4(0.0,33.0,11.0,0.0));
 p.xz=mat2(m)*p.xz;p.x+=t/0.55;
@@ -276,23 +338,42 @@ const prog=gl.createProgram();gl.attachShader(prog,compile(gl.VERTEX_SHADER,vert
 gl.useProgram(prog);
 const buf=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buf);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
 const uRes=gl.getUniformLocation(prog,'u_res'),uTime=gl.getUniformLocation(prog,'u_time');
-function resize(){const dpr=Math.max(1,Math.min(2,devicePixelRatio||1)),w=Math.max(1,Math.floor(innerWidth*dpr)),h=Math.max(1,Math.floor(innerHeight*dpr));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}gl.viewport(0,0,w,h);gl.uniform2f(uRes,w,h)}
+function resize(){const dpr=Math.min(1.25,Math.max(1,devicePixelRatio||1)),w=Math.max(1,Math.floor(innerWidth*dpr)),h=Math.max(1,Math.floor(innerHeight*dpr));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h}gl.viewport(0,0,w,h);gl.uniform2f(uRes,w,h)}
 addEventListener('resize',resize,{passive:true});resize();let raf=0,t0=performance.now();
 function draw(){if(document.hidden){raf=0;return}gl.uniform1f(uTime,(performance.now()-t0)/1000);gl.drawArrays(gl.TRIANGLES,0,6);raf=requestAnimationFrame(draw)}draw();
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!raf)draw()});
 })();
 </script>
+
+<script>
+window.addEventListener('load', function () {
+    setTimeout(function () {
+        window.scrollTo({
+            top: 0,
+            left: 0,
+            behavior: 'instant'
+        });
+    }, 50);
+});
+
+if ('scrollRestoration' in history) {
+    history.scrollRestoration = 'manual';
+}
+</script>
+
 </body></html>"""
 
 
 
-DATA_FILE = "data_v2.json"
+DATA_DIR = "data"
+DATA_FILE = os.path.join(DATA_DIR, "data.json")
+os.makedirs(DATA_DIR, exist_ok=True)
 data_lock = threading.Lock()
 
 def load_data():
     if os.path.exists(DATA_FILE):
         with open(DATA_FILE) as f: return json.load(f)
-    return {"accounts": {}, "users": {}}
+    return {"accounts": {}, "users": {}, "gc_creator_ids": {}}
 
 def save_data(d):
     with open(DATA_FILE, "w") as f: json.dump(d, f, indent=2)
@@ -325,6 +406,113 @@ bot_stop    = {}
 bot_status  = {}
 ig_clients  = {}
 bot_logs    = {}
+
+gc_creator_jobs = {}
+gc_creator_lock = threading.Lock()
+
+def gc_creator_worker(job_id, gc_id, group_count, usernames, remove_username, message_text):
+    with gc_creator_lock:
+        gc_creator_jobs[job_id] = {
+            "running": True,
+            "done": 0,
+            "total": group_count,
+            "logs": [],
+            "error": "",
+            "gc_id": gc_id
+        }
+
+    def add_gc_log(message):
+        with gc_creator_lock:
+            job = gc_creator_jobs.get(job_id)
+            if job:
+                job["logs"].append(f"[{time.strftime('%H:%M:%S')}] {message}")
+                job["logs"] = job["logs"][-100:]
+
+    sock = None
+
+    try:
+        with data_lock:
+            d = load_data()
+            acc = d.get("gc_creator_ids", {}).get(gc_id)
+            if not acc:
+                raise RuntimeError("GC Creator ID not found")
+
+        session_id = acc.get("session_id", "").strip()
+        if not session_id:
+            raise RuntimeError("This GC Creator ID has no session ID")
+
+        proxy = acc.get("proxy", "").strip() or None
+
+        sock_kwargs = {
+            "sessionid": decode_session(session_id)
+        }
+        if proxy:
+            sock_kwargs["proxy"] = proxy
+
+        sock = make_ig_web_socket(**sock_kwargs)
+        sock.connect()
+
+        members_display = ", ".join(usernames)
+
+        for group_number in range(1, group_count + 1):
+            time.sleep(2)
+
+            try:
+                result = sock.create_group(
+                    usernames,
+                    first_message=message_text,
+                    diagnose=True
+                )
+
+                if not result.get("ok"):
+                    add_gc_log(f"GC {group_number} : CREATION FAILED")
+                    continue
+
+                thread_id = result["thread_id"]
+
+                add_gc_log(f"GC {group_number} : CREATED 🤍 - {members_display}")
+                add_gc_log("       SENT 📨")
+
+                time.sleep(1)
+
+                if remove_username:
+                    remove_result = sock.remove_group_member(
+                        thread_id,
+                        remove_username
+                    )
+
+                    if remove_result.get("ok"):
+                        add_gc_log(f"       REMOVED 🗑️ - {remove_username}")
+
+                time.sleep(1)
+                time.sleep(2)
+
+                with gc_creator_lock:
+                    job = gc_creator_jobs.get(job_id)
+                    if job:
+                        job["done"] = group_number
+
+            except Exception as e:
+                add_gc_log(f"GC {group_number} : CREATION FAILED")
+                add_gc_log(f"       {e}")
+                time.sleep(2)
+
+    except Exception as e:
+        add_gc_log(f"❌ Error → {e}")
+        with gc_creator_lock:
+            if job_id in gc_creator_jobs:
+                gc_creator_jobs[job_id]["error"] = str(e)
+
+    finally:
+        try:
+            if sock:
+                sock.disconnect()
+        except Exception:
+            pass
+
+        with gc_creator_lock:
+            if job_id in gc_creator_jobs:
+                gc_creator_jobs[job_id]["running"] = False
 
 def log(acc_id, msg):
     ts = time.strftime("%H:%M:%S")
@@ -405,6 +593,49 @@ def get_client(acc_id, session_id, proxy=None, csrf_token=None):
     persist_client_settings(acc_id, cl)
     return cl
 
+def persist_gc_client_settings(gc_id, cl):
+    try:
+        settings = cl.get_settings()
+        if not settings:
+            return
+        with data_lock:
+            d = load_data()
+            if gc_id in d.get("gc_creator_ids", {}):
+                d["gc_creator_ids"][gc_id]["session_settings"] = settings
+                save_data(d)
+    except Exception:
+        pass
+
+def get_gc_client(gc_id, session_id, proxy=None):
+    cache_key = f"gc:{gc_id}"
+    if cache_key in ig_clients:
+        return ig_clients[cache_key]
+    saved_settings = None
+    try:
+        with data_lock:
+            d = load_data()
+            saved_settings = d.get("gc_creator_ids", {}).get(gc_id, {}).get("session_settings")
+    except Exception:
+        saved_settings = None
+    if saved_settings:
+        try:
+            cl = Client()
+            cl.set_settings(saved_settings)
+            if proxy:
+                cl.set_proxy(proxy)
+            cl.account_info()
+            ig_clients[cache_key] = cl
+            return cl
+        except Exception:
+            pass
+    cl = Client()
+    if proxy:
+        cl.set_proxy(proxy)
+    cl.login_by_sessionid(decode_session(session_id))
+    ig_clients[cache_key] = cl
+    persist_gc_client_settings(gc_id, cl)
+    return cl
+
 def extract_thread_id(s):
     s = s.strip()
     if "instagram.com/direct/t/" in s:
@@ -445,6 +676,549 @@ def get_thread_title(cl, thread_id):
         return (thread.thread_title or "").strip()
     except Exception:
         return None
+
+
+def ravan_send(sock, thread_id, message):
+    try:
+        result = sock.send_message(
+            str(thread_id),
+            {
+                "text": message
+            }
+        )
+        if isinstance(result, dict) and result.get("ok", True) is False:
+            return False, str(result)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def ravan_rename(sock, thread_id, title):
+    try:
+        result = sock.rename_group(
+            str(thread_id),
+            title
+        )
+        if isinstance(result, dict) and result.get("ok", True) is False:
+            return False, str(result)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def ravan_fetch_groups(session_id, proxy=None):
+    # Working RAVAN source fetch logic preserved.
+    cl = Client()
+
+    if proxy:
+        cl.set_proxy(proxy)
+
+    cl.login_by_sessionid(
+        decode_session(session_id)
+    )
+
+    threads = cl.direct_threads(amount=50)
+
+    groups = []
+
+    for t in threads:
+        if t.is_group:
+            # Use the normal Instagram web thread ID (t.pk) for RAVAN.
+            web_thread_id = getattr(t, "pk", None)
+
+            if not web_thread_id:
+                raise ValueError(
+                    f"Could not get normal web thread ID for group {t.thread_title!r}"
+                )
+
+            web_thread_id = str(web_thread_id).strip()
+            group_id = str(t.id).strip()
+            group_name = t.thread_title or group_id
+
+            group_link = f"https://www.instagram.com/direct/t/{web_thread_id}/"
+
+            groups.append({
+                "id": group_id,
+                "web_thread_id": web_thread_id,
+                "name": group_name,
+                "link": group_link
+            })
+
+    return groups
+
+
+def ravan_worker(acc_id, acc, stop_event):
+    session_id = acc.get("session_id", "").strip()
+    proxy = acc.get("proxy", "").strip() or None
+    groups = [extract_thread_id(g) for g in acc.get("groups", "").split("\n") if g.strip()]
+    groups = groups[:1]
+    titles = [t.strip() for t in acc.get("nc_titles", "").split(",") if t.strip()]
+    message_mode = acc.get("message_mode", "SINISTERS")
+    target_name = acc.get("target_name", "").strip()
+    messages = []
+
+    if not session_id:
+        bot_status[acc_id] = {"running": False, "sent": 0, "failed": 0, "last_action": "Session ID missing"}
+        return
+
+    if not groups:
+        bot_status[acc_id] = {"running": False, "sent": 0, "failed": 0, "last_action": "No group selected"}
+        return
+
+    if message_mode == "SINISTERS":
+        try:
+            with open("msg.txt", "r", encoding="utf-8") as f:
+                template_message = f.read()
+            messages = [template_message.replace("<t>", target_name)]
+        except Exception as e:
+            bot_status[acc_id] = {"running": False, "sent": 0, "failed": 0, "last_action": "msg.txt missing"}
+            log(acc_id, f"❌ Could not read msg.txt: {e}")
+            return
+    else:
+        messages = [m.strip() for m in acc.get("messages", "").split("---MSG---") if m.strip()]
+        if not messages:
+            single = acc.get("message", "").strip()
+            if single:
+                messages = [single]
+
+    if not messages:
+        bot_status[acc_id] = {"running": False, "sent": 0, "failed": 0, "last_action": "No message configured"}
+        log(acc_id, "❌ No message configured")
+        return
+
+    msg_delay_min = float(acc.get("msg_delay_min", 2))
+    msg_delay_max = float(acc.get("msg_delay_max", 5))
+    cooldown_after_msgs = int(acc.get("cooldown_after", 0))
+    cooldown_dur = float(acc.get("cooldown_dur", 5))
+    nc_every_msgs = int(acc.get("nc_every_msgs", 0))
+
+    bot_logs[acc_id] = collections.deque(maxlen=300)
+    bot_status[acc_id] = {
+        "running": True, "sent": 0, "failed": 0,
+        "nc_done": 0, "nc_failed": 0, "nc_skipped": 0,
+        "gcs_done": 0, "total_gcs": 1,
+        "last_action": "Connecting with RAVAN...", "started_at": time.time(),
+        "cooldown": False, "cooldown_end": 0,
+        "reauth_attempted": False
+    }
+
+    thread_id = groups[0]
+    log(acc_id, "⚡ Starting RAVAN...")
+    log(acc_id, f"📋 GC: {thread_id} | Titles: {len(titles)} | Messages: {len(messages)}")
+    log(acc_id, f"⏱ Msg delay: {msg_delay_min}-{msg_delay_max}s")
+
+    sock = None
+    try:
+        sock_kwargs = {"sessionid": decode_session(session_id)}
+        if proxy:
+            sock_kwargs["proxy"] = proxy
+        sock = make_ig_web_socket(**sock_kwargs)
+        # Exact connection mode from the supplied working RAVAN script.
+        sock.connect(
+            dm_receive="dgw",
+            send="graphql",
+            keep_alive=False
+        )
+        log(acc_id, f"✅ RAVAN connected{' (proxy)' if proxy else ''}")
+        bot_status[acc_id]["last_action"] = f"RAVAN ready → {thread_id}"
+    except Exception as e:
+        log(acc_id, f"❌ RAVAN login failed: {e}")
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["last_action"] = f"RAVAN login failed: {e}"
+        return
+
+    title_idx = 0
+    msg_idx = 0
+    msgs_since_cd = 0
+    msgs_since_nc = 0
+
+    try:
+        while not stop_event.is_set():
+            if titles and (msgs_since_nc == 0 or (nc_every_msgs > 0 and msgs_since_nc >= nc_every_msgs)):
+                title = titles[title_idx % len(titles)]
+                bot_status[acc_id]["last_action"] = f"RAVAN rename → {title}"
+                ok, err = ravan_rename(sock, thread_id, title)
+                if ok:
+                    bot_status[acc_id]["nc_done"] += 1
+                    log(acc_id, f"💠 RAVAN renamed → {title}")
+                else:
+                    bot_status[acc_id]["nc_failed"] += 1
+                    log(acc_id, f"❌ RAVAN rename failed → {thread_id}: {err}")
+                title_idx += 1
+                msgs_since_nc = 0
+
+            message = messages[msg_idx % len(messages)]
+            bot_status[acc_id]["last_action"] = f"RAVAN sending → {thread_id}"
+            ok, err = ravan_send(sock, thread_id, message)
+            if ok:
+                bot_status[acc_id]["sent"] += 1
+                bot_status[acc_id]["gcs_done"] = 1
+                msgs_since_cd += 1
+                msgs_since_nc += 1
+                log(acc_id, f"📨 RAVAN sent → {thread_id}")
+            else:
+                bot_status[acc_id]["failed"] += 1
+                log(acc_id, f"❌ RAVAN send failed → {thread_id}: {err}")
+
+            msg_idx += 1
+
+            if cooldown_after_msgs > 0 and msgs_since_cd >= cooldown_after_msgs:
+                dur_secs = cooldown_dur * 60
+                bot_status[acc_id]["cooldown"] = True
+                bot_status[acc_id]["cooldown_end"] = time.time() + dur_secs
+                bot_status[acc_id]["last_action"] = f"Cooldown {cooldown_dur} min"
+                while time.time() < bot_status[acc_id]["cooldown_end"] and not stop_event.is_set():
+                    time.sleep(1)
+                bot_status[acc_id]["cooldown"] = False
+                bot_status[acc_id]["cooldown_end"] = 0
+                msgs_since_cd = 0
+                log(acc_id, "✅ Cooldown done — resuming")
+
+            if stop_event.is_set():
+                break
+
+            delay = random.uniform(msg_delay_min, msg_delay_max)
+            bot_status[acc_id]["last_action"] = f"RAVAN delay {delay:.1f}s"
+            time.sleep(delay)
+
+    except Exception as e:
+        log(acc_id, f"❌ RAVAN error → {e}")
+        bot_status[acc_id]["last_action"] = f"RAVAN error: {e}"
+    finally:
+        try:
+            if sock:
+                sock.disconnect()
+        except Exception:
+            pass
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["last_action"] = "RAVAN stopped"
+        log(acc_id, "🛑 RAVAN stopped")
+
+
+def _multi_messages(acc):
+    mode = acc.get("message_mode", "SINISTERS")
+    target = acc.get("target_name", "").strip()
+    if mode == "SINISTERS":
+        try:
+            with open("msg.txt", "r", encoding="utf-8") as f:
+                return [f.read().replace("<t>", target)]
+        except Exception:
+            return []
+    messages = [m.strip() for m in acc.get("messages", "").split("---MSG---") if m.strip()]
+    if not messages and acc.get("message", "").strip():
+        messages = [acc.get("message", "").strip()]
+    return messages
+
+def _multi_titles(acc):
+    return [t.strip() for t in acc.get("nc_titles", "").split(",") if t.strip()]
+
+# AYAN MULTI GC / RAVAN MULTI GC timing is intentionally hardcoded.
+# Sending: GC1 -> 40s -> GC2 -> 40s -> GC3 -> 40s -> GC1 ...
+# Renaming: GC1 -> 180s -> GC2 -> 180s -> GC3 -> 180s -> GC1 ...
+# Sender and renamer threads are started together, but each keeps its own delay.
+MULTI_MSG_DELAY = 40
+MULTI_RENAME_DELAY = 180
+
+def _multi_wait(stop_event, seconds):
+    end = time.time() + seconds
+    while time.time() < end and not stop_event.is_set():
+        time.sleep(min(1.0, max(0.05, end - time.time())))
+
+def _init_multi_status(acc_id, groups, method, titles, messages):
+    bot_logs[acc_id] = collections.deque(maxlen=300)
+    bot_status[acc_id] = {
+        "running": True, "sent": 0, "failed": 0, "nc_done": 0, "nc_failed": 0, "nc_skipped": 0,
+        "gcs_done": 0, "total_gcs": len(groups), "last_action": f"Starting {method}...",
+        "started_at": time.time(), "cooldown": False, "cooldown_end": 0,
+        "reauth_attempted": False, "multi_method": method, "message_delay": MULTI_MSG_DELAY, "rename_delay": MULTI_RENAME_DELAY
+    }
+    log(acc_id, f"⚡ Starting {method}...")
+    log(acc_id, f"📋 GCs: {len(groups)} | Titles: {len(titles)} | Messages: {len(messages)}")
+    log(acc_id, f"⏱ Send delay: {MULTI_MSG_DELAY}s | Rename delay: {MULTI_RENAME_DELAY}s")
+
+def ayaan_multi_gc_worker(acc_id, acc, stop_event):
+    session_id = acc.get("session_id", "").strip()
+    proxy = acc.get("proxy", "").strip() or None
+    raw_groups = acc.get("groups", "")
+    raw_groups = raw_groups.replace("\\n", "\n")
+    groups = [
+        extract_thread_id(g.strip())
+        for g in raw_groups.splitlines()
+        if g.strip()
+    ][:50]
+    titles = _multi_titles(acc)
+    messages = _multi_messages(acc)
+    cooldown_after_msgs = int(acc.get("cooldown_after", 0))
+    cooldown_dur = float(acc.get("cooldown_dur", 5))
+    nc_every_msgs = int(acc.get("nc_every_msgs", 0))
+
+    if not session_id or not groups or not messages:
+        bot_status[acc_id] = {"running": False, "sent": 0, "failed": 0, "nc_done": 0, "nc_failed": 0, "nc_skipped": 0, "total_gcs": len(groups), "last_action": "Missing session, groups or messages"}
+        return
+
+    _init_multi_status(acc_id, groups, "AYAN MULTI GC", titles, messages)
+    bot_status[acc_id]["message_delay"] = MULTI_MSG_DELAY
+    bot_status[acc_id]["rename_delay"] = MULTI_RENAME_DELAY
+    bot_status[acc_id]["nc_every_msgs"] = nc_every_msgs
+    bot_status[acc_id]["cooldown_after"] = cooldown_after_msgs
+    bot_status[acc_id]["cooldown_dur"] = cooldown_dur
+
+    try:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(get_client, acc_id, session_id, proxy, acc.get("csrf_token", "") or None)
+            cl = future.result(timeout=30)
+        log(acc_id, "✅ Instagrapi connected")
+    except concurrent.futures.TimeoutError:
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["last_action"] = "Login timed out"
+        log(acc_id, "❌ Login timed out after 30s — check session ID")
+        return
+    except Exception as e:
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["last_action"] = f"Login failed: {e}"
+        log(acc_id, f"❌ Instagrapi login failed: {e}")
+        return
+
+    title_idx = 0
+    msg_idx = 0
+    msgs_since_cd = 0
+    msgs_since_nc = 0
+
+    def do_nc_for_all():
+        nonlocal title_idx
+        if not titles:
+            return
+        title = titles[title_idx % len(titles)]
+        for thread_id in groups:
+            if stop_event.is_set():
+                break
+            bot_status[acc_id]["last_action"] = f"Checking NC → {thread_id}"
+            try:
+                current_title = get_thread_title(cl, thread_id)
+            except Exception:
+                current_title = None
+            if current_title is not None and current_title.strip() == title.strip():
+                log(acc_id, f"⏭ AYAN MULTI NC skip (already '{title}') → {thread_id}")
+                bot_status[acc_id]["nc_skipped"] += 1
+                continue
+            bot_status[acc_id]["last_action"] = f"AYAN MULTI NC → {title}"
+            try:
+                ok, err = nc_rename(cl, int(thread_id), title)
+                if ok:
+                    bot_status[acc_id]["nc_done"] += 1
+                    persist_client_settings(acc_id, cl)
+                    log(acc_id, f"💠 AYAN MULTI renamed → {title} | {thread_id}")
+                else:
+                    bot_status[acc_id]["nc_failed"] += 1
+                    log(acc_id, f"❌ AYAN MULTI rename failed → {thread_id}: {err}")
+            except Exception as e:
+                bot_status[acc_id]["nc_failed"] += 1
+                log(acc_id, f"❌ AYAN MULTI rename error → {thread_id}: {e}")
+            if stop_event.is_set():
+                break
+            _multi_wait(stop_event, MULTI_RENAME_DELAY)
+        title_idx += 1
+
+    try:
+        if titles:
+            log(acc_id, "✏️ Initial NC...")
+            do_nc_for_all()
+
+        while not stop_event.is_set():
+            bot_status[acc_id]["gcs_done"] = 0
+
+            if titles and nc_every_msgs > 0 and msgs_since_nc >= nc_every_msgs:
+                log(acc_id, f"✏️ NC after {nc_every_msgs} messages...")
+                do_nc_for_all()
+                msgs_since_nc = 0
+
+            for i, thread_id in enumerate(groups):
+                if stop_event.is_set():
+                    break
+                message = messages[msg_idx % len(messages)] if messages else ""
+                bot_status[acc_id]["last_action"] = f"AYAN MULTI sending → {thread_id}"
+                try:
+                    cl.direct_send(message, thread_ids=[int(thread_id)])
+                    bot_status[acc_id]["sent"] += 1
+                    bot_status[acc_id]["gcs_done"] = i + 1
+                    msgs_since_cd += 1
+                    msgs_since_nc += 1
+                    persist_client_settings(acc_id, cl)
+                    log(acc_id, f"📨 AYAN MULTI sent → {thread_id}")
+                except Exception as e:
+                    bot_status[acc_id]["failed"] += 1
+                    log(acc_id, f"❌ AYAN MULTI send failed → {thread_id}: {e}")
+
+                msg_idx += 1
+                if stop_event.is_set():
+                    break
+
+                if stop_event.is_set():
+                    break
+                bot_status[acc_id]["last_action"] = f"AYAN MULTI delay {MULTI_MSG_DELAY}s"
+                _multi_wait(stop_event, MULTI_MSG_DELAY)
+
+            if cooldown_after_msgs > 0 and msgs_since_cd >= cooldown_after_msgs:
+                dur_secs = cooldown_dur * 60
+                bot_status[acc_id]["cooldown"] = True
+                bot_status[acc_id]["cooldown_end"] = time.time() + dur_secs
+                bot_status[acc_id]["last_action"] = f"Cooldown {cooldown_dur} min"
+                log(acc_id, f"😴 Cooldown after {cooldown_after_msgs} messages — {cooldown_dur} min pause...")
+                while time.time() < bot_status[acc_id]["cooldown_end"] and not stop_event.is_set():
+                    time.sleep(1)
+                bot_status[acc_id]["cooldown"] = False
+                bot_status[acc_id]["cooldown_end"] = 0
+                msgs_since_cd = 0
+                log(acc_id, "✅ Cooldown done — resuming")
+
+            bot_status[acc_id]["last_action"] = "Loop complete ✓"
+
+    except Exception as e:
+        log(acc_id, f"❌ AYAN MULTI error → {e}")
+        bot_status[acc_id]["last_action"] = f"AYAN MULTI error: {e}"
+    finally:
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["last_action"] = "AYAN MULTI stopped"
+        log(acc_id, "🛑 AYAN MULTI GC stopped")
+
+
+def ravan_multi_gc_worker(acc_id, acc, stop_event):
+    session_id = acc.get("session_id", "").strip()
+    proxy = acc.get("proxy", "").strip() or None
+    raw_groups = acc.get("groups", "")
+    raw_groups = raw_groups.replace("\\n", "\n")
+    groups = [
+        extract_thread_id(g.strip())
+        for g in raw_groups.splitlines()
+        if g.strip()
+    ][:50]
+    titles = _multi_titles(acc)
+    messages = _multi_messages(acc)
+    cooldown_after_msgs = int(acc.get("cooldown_after", 0))
+    cooldown_dur = float(acc.get("cooldown_dur", 5))
+    nc_every_msgs = int(acc.get("nc_every_msgs", 0))
+
+    if not session_id or not groups or not messages:
+        bot_status[acc_id] = {"running": False, "sent": 0, "failed": 0, "nc_done": 0, "nc_failed": 0, "nc_skipped": 0, "total_gcs": len(groups), "last_action": "Missing session, groups or messages"}
+        return
+
+    _init_multi_status(acc_id, groups, "RAVAN MULTI GC", titles, messages)
+    bot_status[acc_id]["message_delay"] = MULTI_MSG_DELAY
+    bot_status[acc_id]["rename_delay"] = MULTI_RENAME_DELAY
+    bot_status[acc_id]["nc_every_msgs"] = nc_every_msgs
+    bot_status[acc_id]["cooldown_after"] = cooldown_after_msgs
+    bot_status[acc_id]["cooldown_dur"] = cooldown_dur
+
+    sock = None
+    try:
+        kw = {"sessionid": decode_session(session_id)}
+        if proxy:
+            kw["proxy"] = proxy
+        sock = make_ig_web_socket(**kw)
+        sock.connect(dm_receive="dgw", send="graphql", keep_alive=False)
+        log(acc_id, f"✅ RAVAN connected{' (proxy)' if proxy else ''}")
+    except Exception as e:
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["last_action"] = f"RAVAN login failed: {e}"
+        log(acc_id, f"❌ RAVAN login failed: {e}")
+        return
+
+    title_idx = 0
+    msg_idx = 0
+    msgs_since_cd = 0
+    msgs_since_nc = 0
+
+    def do_nc_for_all():
+        nonlocal title_idx
+        if not titles:
+            return
+        title = titles[title_idx % len(titles)]
+        for thread_id in groups:
+            if stop_event.is_set():
+                break
+            bot_status[acc_id]["last_action"] = f"RAVAN MULTI NC → {title}"
+            try:
+                ok, err = ravan_rename(sock, thread_id, title)
+                if ok:
+                    bot_status[acc_id]["nc_done"] += 1
+                    log(acc_id, f"💠 RAVAN MULTI renamed → {title} | {thread_id}")
+                else:
+                    bot_status[acc_id]["nc_failed"] += 1
+                    log(acc_id, f"❌ RAVAN MULTI rename failed → {thread_id}: {err}")
+            except Exception as e:
+                bot_status[acc_id]["nc_failed"] += 1
+                log(acc_id, f"❌ RAVAN MULTI rename error → {thread_id}: {e}")
+            if stop_event.is_set():
+                break
+            _multi_wait(stop_event, MULTI_RENAME_DELAY)
+        title_idx += 1
+
+    try:
+        if titles:
+            log(acc_id, "✏️ Initial NC...")
+            do_nc_for_all()
+
+        while not stop_event.is_set():
+            bot_status[acc_id]["gcs_done"] = 0
+
+            if titles and nc_every_msgs > 0 and msgs_since_nc >= nc_every_msgs:
+                log(acc_id, f"✏️ NC after {nc_every_msgs} messages...")
+                do_nc_for_all()
+                msgs_since_nc = 0
+
+            for i, thread_id in enumerate(groups):
+                if stop_event.is_set():
+                    break
+                message = messages[msg_idx % len(messages)] if messages else ""
+                bot_status[acc_id]["last_action"] = f"RAVAN MULTI sending → {thread_id}"
+                ok, err = ravan_send(sock, thread_id, message)
+                if ok:
+                    bot_status[acc_id]["sent"] += 1
+                    bot_status[acc_id]["gcs_done"] = i + 1
+                    msgs_since_cd += 1
+                    msgs_since_nc += 1
+                    log(acc_id, f"📨 RAVAN MULTI sent → {thread_id}")
+                else:
+                    bot_status[acc_id]["failed"] += 1
+                    log(acc_id, f"❌ RAVAN MULTI send failed → {thread_id}: {err}")
+
+                msg_idx += 1
+                if stop_event.is_set():
+                    break
+
+                if stop_event.is_set():
+                    break
+                bot_status[acc_id]["last_action"] = f"RAVAN MULTI delay {MULTI_MSG_DELAY}s"
+                _multi_wait(stop_event, MULTI_MSG_DELAY)
+
+            if cooldown_after_msgs > 0 and msgs_since_cd >= cooldown_after_msgs:
+                dur_secs = cooldown_dur * 60
+                bot_status[acc_id]["cooldown"] = True
+                bot_status[acc_id]["cooldown_end"] = time.time() + dur_secs
+                bot_status[acc_id]["last_action"] = f"Cooldown {cooldown_dur} min"
+                log(acc_id, f"😴 Cooldown after {cooldown_after_msgs} messages — {cooldown_dur} min pause...")
+                while time.time() < bot_status[acc_id]["cooldown_end"] and not stop_event.is_set():
+                    time.sleep(1)
+                bot_status[acc_id]["cooldown"] = False
+                bot_status[acc_id]["cooldown_end"] = 0
+                msgs_since_cd = 0
+                log(acc_id, "✅ Cooldown done — resuming")
+
+            bot_status[acc_id]["last_action"] = "Loop complete ✓"
+
+    except Exception as e:
+        log(acc_id, f"❌ RAVAN MULTI error → {e}")
+        bot_status[acc_id]["last_action"] = f"RAVAN MULTI error: {e}"
+    finally:
+        try:
+            if sock:
+                sock.disconnect()
+        except Exception:
+            pass
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["last_action"] = "RAVAN MULTI stopped"
+        log(acc_id, "🛑 RAVAN MULTI GC stopped")
 
 def bot_worker(acc_id, acc, stop_event):
     session_id = acc["session_id"]
@@ -704,7 +1478,7 @@ button,input,textarea{font:inherit}.shell{display:flex;min-height:100vh}
 @media(max-width:760px){.sidebar{width:58px;padding:10px 7px}.brand{justify-content:center;padding:7px 0 18px}.brand-name,.brand-sub,.nav-label,.side-bottom{display:none}.brand-mark{width:36px;height:36px}.nav-item{justify-content:center;padding:10px 0}.nav-icon{width:auto}.main{margin-left:58px;width:calc(100% - 58px);padding:12px 10px 24px}.topbar{align-items:flex-start}.top-title h1{font-size:18px}.system-pill{display:none}.stats{grid-template-columns:repeat(2,1fr);gap:8px}.stat-card{padding:10px}.stat-icon{width:34px;height:34px}.stat-number{font-size:18px}.panel-head{align-items:stretch;flex-direction:column}.search{width:100%}.panel-tools{width:100%}.panel-tools .btn-add{flex:1}#accounts-wrap{grid-template-columns:1fr}.acc-btns{flex-wrap:wrap}.acc-btns .btn{padding:6px 7px}.bottom-grid{grid-template-columns:1fr}.form-grid{grid-template-columns:1fr}.form-group.full{grid-column:auto}.fetch-row{align-items:stretch;flex-direction:column}.modal{padding:16px}}
 
 .tg-section{margin-top:18px}.tg-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}.tg-card{min-height:150px}.tg-list{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}.tg-bot{border:1px solid var(--line);background:linear-gradient(145deg,#0b1015,#080b10);border-radius:12px;padding:14px}.tg-bot-head{display:flex;align-items:center;gap:10px}.tg-dot{width:9px;height:9px;border-radius:50%;background:#64748b}.tg-dot.on{background:#22c55e;box-shadow:0 0 10px #22c55e99}.tg-name{font:14px 'Share Tech Mono';color:#99f6e4;flex:1}.tg-meta{font-size:10px;color:#64748b}.tg-actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}.tg-users-list{margin-top:10px;color:#94a3b8;font:11px 'Share Tech Mono';line-height:1.8}.tg-token{color:#64748b;font:10px 'Share Tech Mono';margin-top:7px}.tg-empty{border:1px dashed #334155;padding:20px;border-radius:10px;text-align:center;color:#64748b}.tg-modal-note{font-size:10px;color:#64748b;margin-top:5px}@media(max-width:760px){.tg-grid,.tg-list{grid-template-columns:1fr}}
-/* SX7 DARKNESS THEME — inspired by the supplied home/contact artwork */
+
 :root{--bg:#05070a!important;--bg2:#0a0e13!important;--card:#101820!important;--card2:#141c24!important;--line:#394650!important;--purple:#8b1235!important;--purple2:#b9975b!important;--cyan:#58d9f2!important;--text:#eee6d8!important;--muted:#89939c!important}
 body{background:radial-gradient(circle at 70% -10%,#24475b2b,transparent 35%),repeating-linear-gradient(125deg,#ffffff03 0 2px,transparent 2px 7px),linear-gradient(135deg,#050609,#0a1117)!important}
 .sidebar{width:205px!important;background:linear-gradient(180deg,#17171a,#0b0d11 60%,#171014)!important;border-right:1px solid #5b5157!important;box-shadow:10px 0 35px #0009!important}
@@ -733,16 +1507,17 @@ button{transition:transform .16s ease,box-shadow .16s ease,background .16s ease}
 button:active{transform:translateY(1px)}
 .badge,.status,.pill{border-radius:999px!important}
 
-/* LARGE, CLEAR ID NAME */
+
 .acc-header{padding:14px 15px!important;gap:11px!important;min-height:64px!important}
 .acc-name{font-size:26px!important;font-weight:800!important;line-height:1.15!important;letter-spacing:.4px!important;color:#f1dfb9!important;display:block!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important}
 .status-dot{width:10px!important;height:10px!important}
 .acc-runtime{font-size:10px!important;flex:none!important}
 @media(max-width:760px){.acc-header{padding:13px!important;min-height:60px!important}.acc-name{font-size:22px!important}}
-/* CLASSY INSTAGRAM NAV / DASHBOARD */
-.sidebar{width:178px!important;background:linear-gradient(180deg,#151416,#0b0c0f 65%,#171116)!important;border-right:1px solid #4b443d!important;box-shadow:12px 0 40px #0009!important}.brand{padding:12px 8px 30px!important}.brand-mark{background:linear-gradient(145deg,#6f6870,#17191d)!important;border:1px solid #c4a96c!important;color:#ead8a6!important;box-shadow:0 8px 25px #000!important}.brand-name{color:#d8bb78!important;letter-spacing:1.5px!important}.brand-sub{color:#8f9296!important}.nav{gap:8px!important}.nav-item{padding:13px 12px!important;border-radius:10px!important;color:#989da3!important}.nav-item:hover,.nav-item.active{background:linear-gradient(90deg,#7b173022,#c09d5a10)!important;border-color:#b9975b55!important;color:#f1dfb9!important}.nav-icon{color:#c5a868!important}.main{margin-left:178px!important;padding:26px 30px 40px!important}.topbar{padding:14px 0 18px!important;border-bottom:1px solid #3b3f45!important}.top-title h1{font-family:'Playfair Display',serif!important;color:#e2c783!important;letter-spacing:2px!important;font-size:26px!important}.top-title p{letter-spacing:2px!important}.stat-card,.acc-card,.tg-card,.tg-bot,.mini-panel{background:linear-gradient(145deg,#15181d,#0b0e12)!important;border-color:#3d434a!important;border-radius:15px!important;box-shadow:0 18px 45px #0007!important}.btn-add,.btn-save{background:linear-gradient(135deg,#71132f,#9b1b3e)!important;border-color:#c6a667!important}.btn{border-color:#3e454c!important}.btn:hover{border-color:#b9975b!important;box-shadow:0 0 18px #b9975b22!important}@media(max-width:760px){.sidebar{width:58px!important}.main{margin-left:58px!important;width:calc(100% - 58px)!important;padding:16px 12px 28px!important}}
 
-/* ===== PANEL: ATC FULL-SCREEN BACKGROUND + LIQUID GLASS ===== */
+.sidebar{width:178px!important;background:linear-gradient(180deg,#151416,#0b0c0f 65%,#171116)!important;border-right:1px solid #4b443d!important;box-shadow:12px 0 40px #0009!important}.brand{padding:12px 8px 12px!important}.brand-mark{display:none!important}.gc-creator-icon{font-size:28px!important;line-height:1!important;width:22px!important;height:22px!important;display:flex!important;align-items:center!important;justify-content:center!important;color:#c5a868!important;font-weight:400!important}.brand-mark{background:linear-gradient(145deg,#6f6870,#17191d)!important;border:1px solid #c4a96c!important;color:#ead8a6!important;box-shadow:0 8px 25px #000!important}.brand-name{color:#d8bb78!important;letter-spacing:1.5px!important}.brand-sub{color:#8f9296!important}.nav{gap:8px!important}.nav-item{padding:13px 12px!important;border-radius:10px!important;color:#989da3!important}.nav-item:hover,.nav-item.active{background:linear-gradient(90deg,#7b173022,#c09d5a10)!important;border-color:#b9975b55!important;color:#f1dfb9!important}.nav-icon{color:#c5a868!important}.main{margin-left:178px!important;padding:26px 30px 40px!important}.topbar{padding:14px 0 18px!important;border-bottom:1px solid #3b3f45!important}.top-title h1{font-family:'Playfair Display',serif!important;color:#e2c783!important;letter-spacing:2px!important;font-size:26px!important}.top-title p{letter-spacing:2px!important}.stat-card,.acc-card,.tg-card,.tg-bot,.mini-panel{background:linear-gradient(145deg,#15181d,#0b0e12)!important;border-color:#3d434a!important;border-radius:15px!important;box-shadow:0 18px 45px #0007!important}.btn-add,.btn-save{background:linear-gradient(135deg,#71132f,#9b1b3e)!important;border-color:#c6a667!important}.btn{border-color:#3e454c!important}.btn:hover{border-color:#b9975b!important;box-shadow:0 0 18px #b9975b22!important}@media(max-width:760px){.sidebar{width:58px!important}.main{margin-left:58px!important;width:calc(100% - 58px)!important;padding:16px 12px 28px!important}}
+.gc-creator-modal{width:620px}.gc-job-status{min-height:20px;margin:0 0 10px;color:#cbd5e1;font:10px 'Share Tech Mono'}.gc-job-log{height:150px;overflow:auto;padding:10px;border:1px solid rgba(255,255,255,.12);border-radius:10px;background:rgba(0,0,0,.18);color:#a8b3bd;font:9px/1.7 'Share Tech Mono';white-space:pre-wrap}.gc-job-log:empty{display:none}
+
+
 html,body{
   min-height:100%;
   background:transparent!important;
@@ -752,7 +1527,7 @@ body{
   color:#eef2ff;
 }
 
-/* The supplied ATC WebGL shader is the actual page background. */
+
 #atc-panel-background{
   position:fixed!important;
   inset:0!important;
@@ -764,7 +1539,7 @@ body{
   pointer-events:none!important;
 }
 
-/* Very light readability layer — intentionally transparent enough to see ATC. */
+
 #atc-panel-overlay{
   position:fixed!important;
   inset:0!important;
@@ -781,13 +1556,13 @@ body{
   background:transparent!important;
 }
 
-/* Remove the old opaque panel background. */
+
 .main,
 .sidebar{
   background:transparent!important;
 }
 
-/* Liquid-glass surfaces. */
+
 .sidebar,
 .topbar,
 .stat-card,
@@ -813,8 +1588,8 @@ body{
     0 18px 55px rgba(0,0,0,.25),
     inset 0 1px 0 rgba(255,255,255,.14),
     inset 0 -1px 0 rgba(255,255,255,.035)!important;
-  backdrop-filter:blur(20px) saturate(140%)!important;
-  -webkit-backdrop-filter:blur(20px) saturate(140%)!important;
+  backdrop-filter:blur(10px) saturate(125%)!important;
+  -webkit-backdrop-filter:blur(10px) saturate(125%)!important;
 }
 
 .sidebar{
@@ -852,8 +1627,8 @@ body{
 input,textarea,select,.search{
   background:rgba(0,0,0,.20)!important;
   border-color:rgba(255,255,255,.15)!important;
-  backdrop-filter:blur(14px)!important;
-  -webkit-backdrop-filter:blur(14px)!important;
+  backdrop-filter:blur(8px)!important;
+  -webkit-backdrop-filter:blur(8px)!important;
 }
 
 .btn{
@@ -885,11 +1660,12 @@ input,textarea,select,.search{
 <div id="atc-panel-overlay" aria-hidden="true"></div>
 <div class="shell">
 <aside class="sidebar">
-  <div class="brand"><div class="brand-mark">S</div><div><div class="brand-name">SINISTERS SX7</div><div class="brand-sub">PANEL</div></div></div>
+  <div class="brand"><div><div class="brand-name">SINISTERS SX7</div><div class="brand-sub">PANEL</div></div></div>
   <nav class="nav">
     <a class="nav-item active" href="/"><span class="nav-icon"><img src="https://cdn.21st.dev/assets/mirror/99/9963f31f43cd77b0c28981ba7bac04db749a5749019f554d1afb75225a3e9151.png" alt="" aria-hidden="true"></span><span class="nav-label">Home</span></a>
     <a class="nav-item" href="/instagram"><span class="nav-icon"><img src="https://cdn.21st.dev/assets/mirror/d5/d558230225bb0dd1897db6c7cf0d03b29506eef8078fe25313c48cd8f72d05ad.png" alt="" aria-hidden="true"></span><span class="nav-label">Instagram</span></a>
     <a class="nav-item" href="/contact"><span class="nav-icon"><img src="https://cdn.21st.dev/assets/mirror/7b/7bb8671183d2a2bbb8a3858b1971cc5699ba0103673b011590d22f0fa309bb87.png" alt="" aria-hidden="true"></span><span class="nav-label">Contact</span></a>
+    <a class="nav-item" href="/gc-creator"><span class="nav-icon gc-creator-icon">＋</span><span class="nav-label">GC Creator</span></a>
   </nav>
   <div class="side-bottom"><div class="side-owner"><strong>SINISTERS SX7</strong>PANEL • v2.0</div></div>
 </aside>
@@ -916,6 +1692,41 @@ input,textarea,select,.search{
 </main>
 </div>
 
+
+<div class="modal-overlay" id="gc-creator">
+  <div class="modal gc-creator-modal">
+    <div class="modal-title">GC CREATOR</div>
+    <div class="form-section">
+      <div class="form-section-title">Instagram ID</div>
+      <div class="form-grid">
+        <div class="form-group full">
+          <label>SELECT ID</label>
+          <select id="gc-account"></select>
+          <div class="hint">The selected saved Instagram ID supplies the session.</div>
+        </div>
+        <div class="form-group">
+          <label>GCs TO CREATE</label>
+          <input id="gc-count-input" type="number" min="1" max="50" value="1"/>
+        </div>
+        <div class="form-group">
+          <label>REMOVE USERNAME</label>
+          <input id="gc-remove-user" type="text" placeholder="username"/>
+        </div>
+        <div class="form-group full">
+          <label>USERNAMES</label>
+          <textarea id="gc-users" rows="4" placeholder="user1, user2, user3"></textarea>
+          <div class="hint">Separate usernames with commas. Minimum 2 users.</div>
+        </div>
+      </div>
+    </div>
+    <div class="gc-job-status" id="gc-job-status"></div>
+    <div class="gc-job-log" id="gc-job-log"></div>
+    <div class="modal-footer">
+      <button class="btn-cancel" onclick="closeGCCreator()">CANCEL</button>
+      <button class="btn-save" id="gc-start-btn" onclick="startGCCreator()">CREATE GCs</button>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="modal">
 <div class="modal">
   <div class="modal-title" id="modal-title">Add Account</div>
@@ -925,7 +1736,7 @@ input,textarea,select,.search{
     <div class="form-section-title">Account</div>
     <div class="form-grid">
       <div class="form-group"><label>ID USERNAME</label><input type="text" id="f-name" placeholder="ID USERNAME"/></div>
-      <div class="form-group"><label>SCRIPT</label><select id="f-method"><option value="INSTAGRAPI">INSTAGRAPI</option><option value="PLAYWRIGHT">PLAYWRIGHT</option><option value="PUPPETEER">PUPPETEER</option></select><div class="hint">CHOOSE 1</div></div>
+      <div class="form-group"><label>SCRIPT</label><select id="f-method" onchange="handleMethodChange()"><option value="INSTAGRAPI">INSTAGRAPI</option><option value="PUPPETEER">PUPPETEER</option><option value="PLAYWRIGHT">PLAYWRIGHT</option><option value="AYAN MULTI GC">AYAN MULTI GC</option><option value="RAVAN MULTI GC">RAVAN MULTI GC</option><option value="RAVAN">RAVAN</option></select><div class="hint">CHOOSE 1</div></div>
       <div class="form-group"><label>SESSIONID</label><input type="text" id="f-sid" placeholder="sessionid" autocomplete="off"/></div>
       <div class="form-group"><label>CSRFT TOKEN<span style="opacity:.5;font-weight:400">(optional)</span></label><input type="text" id="f-csrf" placeholder="csrftoken" autocomplete="off"/></div>
       <div class="form-group full"><label>PROXY<span style="opacity:.5;font-weight:400">(optional)</span></label><input type="text" id="f-proxy" placeholder="http://user:pass@ip:port"/></div>
@@ -934,7 +1745,7 @@ input,textarea,select,.search{
 
   
   <div class="form-section">
-    <div class="form-section-title">Group Chats (Max 5)</div>
+    <div class="form-section-title" id="groups-section-title">Group Chats (Max 5)</div>
     <div class="fetch-row">
       <div class="form-group" style="flex:1">
         <label>Session ID for Fetch</label>
@@ -943,7 +1754,10 @@ input,textarea,select,.search{
     </div>
     <div id="fetch-status"></div>
     <div class="gc-picker" id="gc-picker">
-      <div class="gc-picker-title">Select up to 5 GCs</div>
+      <div class="gc-picker-title" id="gc-picker-title">Select up to 5 GCs</div>
+      <div id="gc-select-all-wrap" style="display:none;justify-content:flex-end;margin:8px 0;">
+        <button type="button" class="btn-fetch" id="gc-select-all-btn" onclick="toggleSelectAllGCs()">SELECT ALL</button>
+      </div>
       <div class="gc-list" id="gc-list"></div>
       <div class="gc-count" id="gc-count">0 / 5 selected</div>
     </div>
@@ -987,7 +1801,7 @@ input,textarea,select,.search{
   </div>
 
   
-  <div class="form-section">
+  <div class="form-section" id="delay-section">
     <div class="form-section-title">Delays</div>
     <div class="form-grid">
       <div class="form-group">
@@ -1025,12 +1839,9 @@ input,textarea,select,.search{
 <script>
 let accounts = {};
 let editingId = null;
-// Permanent uptime anchor for the currently logged-in registered user.
-// This value comes from users[username].created_at_epoch and never changes
-// during login/logout, password reset, or panel refresh.
 const USER_REGISTERED_AT = Number({{ user_created_at_epoch|default(0)|tojson }});
 let fetchedGroups = [];
-let selectedGCs = []; // [{id, name}]
+let selectedGCs = [];
 
 async function fetchGroups() {
   const sid = document.getElementById('f-sid').value.trim();
@@ -1043,7 +1854,7 @@ async function fetchGroups() {
     const r = await fetch('/api/fetch-groups', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({session_id: sid, acc_id: editingId || 'fetch_temp', proxy: proxy})
+      body: JSON.stringify({session_id: sid, acc_id: editingId || 'fetch_temp', proxy: proxy, method: document.getElementById('f-method').value})
     });
     const d = await r.json();
     if (d.groups && d.groups.length > 0) {
@@ -1061,6 +1872,48 @@ async function fetchGroups() {
   }
 }
 
+function isMultiMethod() {
+  const m = document.getElementById('f-method').value;
+  return m === 'AYAN MULTI GC' || m === 'RAVAN MULTI GC';
+}
+
+function getGroupSelectionLimit() {
+  const m = document.getElementById('f-method').value;
+  if (isMultiMethod()) return 50;
+  return m === 'RAVAN' ? 1 : 5;
+}
+
+function handleMethodChange() {
+  const method = document.getElementById('f-method').value;
+  const limit = getGroupSelectionLimit();
+  const title = document.getElementById('groups-section-title');
+  const pickerTitle = document.getElementById('gc-picker-title');
+  const selectAllWrap = document.getElementById('gc-select-all-wrap');
+  const delaySection = document.getElementById('delay-section');
+
+  if (isMultiMethod()) {
+    title.textContent = method === 'AYAN MULTI GC' ? 'Group Chats (AYAN MULTI GC)' : 'Group Chats (RAVAN MULTI GC)';
+    pickerTitle.textContent = 'Select GCs (up to 50)';
+    selectAllWrap.style.display = 'flex';
+    delaySection.style.display = 'none';
+  } else if (method === 'RAVAN') {
+    title.textContent = 'Group Chat (RAVAN)';
+    pickerTitle.textContent = 'Select 1 GC';
+    selectAllWrap.style.display = 'none';
+    delaySection.style.display = '';
+    if (selectedGCs.length > 1) selectedGCs = selectedGCs.slice(0, 1);
+  } else {
+    title.textContent = 'Group Chats (Max 5)';
+    pickerTitle.textContent = 'Select up to 5 GCs';
+    selectAllWrap.style.display = 'none';
+    delaySection.style.display = '';
+    if (selectedGCs.length > limit) selectedGCs = selectedGCs.slice(0, limit);
+  }
+
+  renderGCPicker();
+  syncGroupsField();
+}
+
 function renderGCPicker() {
   const picker = document.getElementById('gc-picker');
   const list = document.getElementById('gc-list');
@@ -1073,23 +1926,28 @@ function renderGCPicker() {
     item.innerHTML = `
       <input type="checkbox" ${isSelected ? 'checked' : ''} data-id="${g.id}" data-name="${g.name}"/>
       <span class="gc-item-name">${g.name}</span>
-      
     `;
     const cb = item.querySelector('input');
-    cb.addEventListener('change', () => toggleGC(g.id, g.name, cb, item));
+    cb.addEventListener('change', () => toggleGC(
+      (document.getElementById('f-method').value === 'RAVAN' || document.getElementById('f-method').value === 'RAVAN MULTI GC') && g.web_thread_id ? g.web_thread_id : g.id,
+      g.name, cb, item
+    ));
     list.appendChild(item);
   });
+  document.getElementById('gc-select-all-wrap').style.display = isMultiMethod() ? 'flex' : 'none';
   updateGCCount();
+  updateSelectAllButton();
 }
 
 function toggleGC(id, name, cb, item) {
+  const limit = getGroupSelectionLimit();
   if (cb.checked) {
-    if (selectedGCs.length >= 5) {
+    if (selectedGCs.length >= limit) {
       cb.checked = false;
-      alert('Max 5 GCs allowed');
+      alert(limit === 1 ? 'RAVAN allows only 1 selected GC' : 'Max 50 GCs allowed');
       return;
     }
-    selectedGCs.push({id, name});
+    if (!selectedGCs.some(s => s.id === id)) selectedGCs.push({id, name});
     item.classList.add('selected');
   } else {
     selectedGCs = selectedGCs.filter(s => s.id !== id);
@@ -1099,8 +1957,46 @@ function toggleGC(id, name, cb, item) {
   syncGroupsField();
 }
 
+function selectAllGCs() {
+  if (!isMultiMethod()) return;
+  const method = document.getElementById('f-method').value;
+  selectedGCs = fetchedGroups.slice(0, 50).map(g => ({
+    id: ((method === 'RAVAN' || method === 'RAVAN MULTI GC') && g.web_thread_id) ? g.web_thread_id : g.id,
+    name: g.name
+  }));
+  renderGCPicker();
+  syncGroupsField();
+  updateSelectAllButton();
+}
+
+function clearAllGCs() {
+  selectedGCs = [];
+  renderGCPicker();
+  syncGroupsField();
+  updateSelectAllButton();
+}
+
+function updateSelectAllButton() {
+  const btn = document.getElementById('gc-select-all-btn');
+  if (!btn || !isMultiMethod()) return;
+  const total = Math.min(fetchedGroups.length, 50);
+  const selected = selectedGCs.length;
+  btn.textContent = total > 0 && selected === total ? 'UNSELECT ALL' : 'SELECT ALL';
+}
+
+function toggleSelectAllGCs() {
+  if (!isMultiMethod()) return;
+  const total = Math.min(fetchedGroups.length, 50);
+  if (total > 0 && selectedGCs.length === total) {
+    clearAllGCs();
+  } else {
+    selectAllGCs();
+  }
+}
+
 function updateGCCount() {
-  document.getElementById('gc-count').textContent = `${selectedGCs.length} / 5 selected`;
+  const limit = getGroupSelectionLimit();
+  document.getElementById('gc-count').textContent = `${selectedGCs.length} / ${limit} selected`;
 }
 
 function syncGroupsField() {
@@ -1151,6 +2047,7 @@ function openAddModal() {
   document.getElementById('gc-picker').style.display = 'none';
   document.getElementById('gc-list').innerHTML = '';
   document.getElementById('gc-count').textContent = '0 / 5 selected';
+  document.getElementById('gc-select-all-btn').textContent = 'SELECT ALL';
   document.getElementById('fetch-status').textContent = '';
   setMsgs('');
   toggleMessageMode();
@@ -1172,6 +2069,7 @@ function openEditModal(id) {
   document.getElementById('modal-title').textContent = 'Edit Instagram ID';
   document.getElementById('f-name').value = acc.name || '';
   document.getElementById('f-method').value = acc.method || 'INSTAGRAPI';
+  handleMethodChange();
   document.getElementById('f-message-mode').value = acc.message_mode || 'SINISTERS';
   document.getElementById('f-target-name').value = acc.target_name || '';
   document.getElementById('f-sid').value = acc.session_id || '';
@@ -1222,30 +2120,173 @@ async function saveAccount() {
     method:          document.getElementById('f-method').value,
     message_mode:   messageMode,
     target_name:    targetName,
-    session_id:      document.getElementById('f-sid').value.trim(),
-    csrf_token:      document.getElementById('f-csrf').value.trim(),
+    session_id:     document.getElementById('f-sid').value.trim(),
+    csrf_token:     document.getElementById('f-csrf').value.trim(),
     proxy:           document.getElementById('f-proxy').value.trim(),
     groups:          selectedGCs.map(s => s.id).join('\n'),
     group_names:     selectedGCs.map(s => s.name).join('\n'),
     nc_titles:       document.getElementById('f-titles').value.trim(),
     messages:        msgs.join('---MSG---'),
-    msg_delay_min:   document.getElementById('f-msg-min').value,
-    msg_delay_max:   document.getElementById('f-msg-max').value,
-    nc_every_msgs:   document.getElementById('f-nc-every-msgs').value,
-    cooldown_after:  document.getElementById('f-cooldown-after').value,
-    cooldown_dur:    document.getElementById('f-cooldown-dur').value,
   };
 
+  // Normal methods keep their existing UI timing inputs.
+  // AYAN/RAVAN MULTI GC use hardcoded timing in their workers.
+  if (!isMultiMethod()) {
+    body.msg_delay_min  = document.getElementById('f-msg-min').value;
+    body.msg_delay_max  = document.getElementById('f-msg-max').value;
+    body.nc_every_msgs  = document.getElementById('f-nc-every-msgs').value;
+    body.cooldown_after = document.getElementById('f-cooldown-after').value;
+    body.cooldown_dur   = document.getElementById('f-cooldown-dur').value;
+  }
+
   if (!body.name) { alert('Enter ID name'); return; }
+  if (isMultiMethod() && selectedGCs.length === 0) { alert('Select at least one GC'); return; }
   if (editingId && !body.session_id) delete body.session_id;
 
   const url    = editingId ? `/api/accounts/${editingId}` : '/api/accounts';
   const method = editingId ? 'PUT' : 'POST';
   const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
   const d = await r.json();
-  if (d.success) { closeModal(); loadAccounts(); }
-  else alert(d.error || 'Save failed');
+  if (d.success) {
+    closeModal();
+    loadAccounts();
+  } else {
+    alert(d.error || 'Save failed');
+  }
 }
+
+let gcJobPoll = null;
+
+function openGCCreator() {
+  const select = document.getElementById('gc-account');
+  select.innerHTML = '';
+  Object.entries(accounts).forEach(([id, acc]) => {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = acc.name || id;
+    select.appendChild(option);
+  });
+
+  document.getElementById('gc-job-status').textContent = '';
+  document.getElementById('gc-job-log').textContent = '';
+  document.getElementById('gc-count-input').value = '1';
+  document.getElementById('gc-users').value = '';
+  document.getElementById('gc-remove-user').value = '';
+  document.getElementById('gc-start-btn').disabled = false;
+  document.getElementById('gc-creator').classList.add('open');
+}
+
+function closeGCCreator() {
+  document.getElementById('gc-creator').classList.remove('open');
+  if (gcJobPoll) {
+    clearInterval(gcJobPoll);
+    gcJobPoll = null;
+  }
+}
+
+async function startGCCreator() {
+  const accountId = document.getElementById('gc-account').value;
+  const count = Number(document.getElementById('gc-count-input').value);
+  const users = document.getElementById('gc-users').value
+    .split(',')
+    .map(x => x.trim().replace(/^@/, ''))
+    .filter(Boolean);
+  const removeUsername = document.getElementById('gc-remove-user').value.trim().replace(/^@/, '');
+  const status = document.getElementById('gc-job-status');
+  const logBox = document.getElementById('gc-job-log');
+  const button = document.getElementById('gc-start-btn');
+
+  if (!accountId) {
+    status.textContent = 'Add an Instagram ID first.';
+    return;
+  }
+  if (!Number.isInteger(count) || count < 1 || count > 50) {
+    status.textContent = 'GC count must be between 1 and 50.';
+    return;
+  }
+  if (users.length < 2) {
+    status.textContent = 'Enter at least 2 usernames.';
+    return;
+  }
+  if (!removeUsername) {
+    status.textContent = 'Enter the username to remove.';
+    return;
+  }
+  if (!users.includes(removeUsername)) {
+    status.textContent = 'Remove username must be one of the entered members.';
+    return;
+  }
+
+  button.disabled = true;
+  status.textContent = 'Starting...';
+  logBox.textContent = '';
+
+  try {
+    const response = await fetch('/api/gc-creator/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        acc_id: accountId,
+        group_count: count,
+        usernames: users,
+        remove_username: removeUsername
+      })
+    });
+
+    const data = await response.json();
+
+    if (!data.success) {
+      status.textContent = data.error || 'Could not start GC Creator.';
+      button.disabled = false;
+      return;
+    }
+
+    status.textContent = 'Running...';
+    pollGCJob(data.job_id);
+  } catch (e) {
+    status.textContent = 'Network error.';
+    button.disabled = false;
+  }
+}
+
+function pollGCJob(jobId) {
+  if (gcJobPoll) clearInterval(gcJobPoll);
+
+  const poll = async () => {
+    try {
+      const response = await fetch(`/api/gc-creator/status/${jobId}`);
+      const data = await response.json();
+
+      if (!data.success) {
+        document.getElementById('gc-job-status').textContent =
+          data.error || 'Could not read job status.';
+        return;
+      }
+
+      document.getElementById('gc-job-status').textContent =
+        data.running ? `Running • ${data.done}/${data.total}` :
+        data.error ? `Failed • ${data.done}/${data.total}` :
+        `Completed • ${data.done}/${data.total}`;
+
+      document.getElementById('gc-job-log').textContent =
+        (data.logs || []).join('\n');
+
+      if (!data.running) {
+        clearInterval(gcJobPoll);
+        gcJobPoll = null;
+        document.getElementById('gc-start-btn').disabled = false;
+        loadAccounts();
+      }
+    } catch (e) {}
+  };
+
+  poll();
+  gcJobPoll = setInterval(poll, 1500);
+}
+
+document.getElementById('gc-creator').addEventListener('click', function(e) {
+  if (e.target === this) closeGCCreator();
+});
 
 async function startBot(id) {
   const r = await fetch(`/api/accounts/${id}/start`, {method:'POST'});
@@ -1315,7 +2356,11 @@ function renderAccounts(data) {
       : (isCooldown ? ' 😴 COOLDOWN' : '');
 
     const dotCls = isCooldown ? 'dot-cooldown' : (isRunning ? 'dot-on' : 'dot-off');
-    const gcNames = acc.group_names ? acc.group_names.split('\n').filter(Boolean) : [];
+    const gcNames = acc.group_names ? String(acc.group_names).split(/\\n|\n/).filter(Boolean) : [];
+    const gcIds = acc.groups ? String(acc.groups).split(/\\n|\n/).filter(Boolean) : [];
+    const normalizedMethod = String(acc.method || '').trim().toUpperCase();
+    const isMultiGC = normalizedMethod === 'AYAN MULTI GC' || normalizedMethod === 'RAVAN MULTI GC';
+    const selectedGCCount = gcIds.length || gcNames.length;
 
     let existing = document.getElementById(`card-${id}`);
     if (!existing) {
@@ -1352,13 +2397,17 @@ function renderAccounts(data) {
           
           <div class="stat"><div class="stat-val c-amber">${st.gcs_done||0}<span style="color:var(--muted);font-size:12px"> / ${st.total_gcs||0}</span></div><div class="stat-lbl">GCs</div></div>
         </div>
-        ${gcNames.length ? `
+        ${isMultiGC ? `
+        <div class="gc-row">
+          <span class="gc-label">GCs</span>
+          <span class="gc-pill">${selectedGCCount}</span>
+        </div>` : (gcNames.length ? `
         <div class="gc-row">
           <span class="gc-label">GCs</span>
           ${gcNames.map(n=>`<span class="gc-pill">${n}</span>`).join('')}
-        </div>` : ''}
+        </div>` : '')}
         <div class="info-row">
-          <div class="info-item"><span class="info-key">Delay</span><span class="info-val">${acc.msg_delay_min||2}s – ${acc.msg_delay_max||5}s</span></div>
+          <div class="info-item"><span class="info-key">Delay</span><span class="info-val">${(acc.method==='AYAN MULTI GC'||acc.method==='RAVAN MULTI GC') ? 'Send 40s • Rename 180s' : `${acc.msg_delay_min||2}s – ${acc.msg_delay_max||5}s`}</span></div>
           ${acc.cooldown_after > 0 ? `<div class="info-item"><span class="info-key">Cooldown</span><span class="info-val">After ${acc.cooldown_after} msgs → ${acc.cooldown_dur} min pause</span></div>` : ''}
           ${acc.nc_titles ? `<div class="info-item"><span class="info-key">NC</span><span class="info-val">${acc.nc_titles.split(',').length} titles</span></div>` : ''}
         </div>
@@ -1451,7 +2500,7 @@ document.getElementById('modal').addEventListener('click', function(e) {
 </script>
 
 <script>
-/* ATC WebGL2 background — adapted directly from the supplied shader component. */
+
 (function(){
   const canvas=document.getElementById('atc-panel-background');
   if(!canvas)return;
@@ -1492,7 +2541,7 @@ document.getElementById('modal').addEventListener('click', function(e) {
     vec3 v=vec3(1.0,2.0,6.0);
     float i=0.0,z=1.0,d=1.0,f=1.0;
 
-    for(;i++<5e1;
+    for(;i++<28.0;
       o.rgb+=(cos((p.x+z+v)*0.1)+1.0)/d/f/z)
     {
       p=z*normalize(FC*2.0-r.xyy);
@@ -1615,25 +2664,8 @@ def render_login(error=""):
 
 
 def send_registration_otp(email, username, otp):
-    if not RESEND_API_KEY:
-        raise RuntimeError("RESEND_API_KEY is not configured.")
-
-    resend.api_key = RESEND_API_KEY
-
-    params = {
-        "from": RESEND_FROM,
-        "to": [email],
-        "subject": "SINISTERS SX7 • Registration OTP",
-        "text": (
-            f"Hello {username},\n\n"
-            f"Your SINISTERS SX7 registration OTP is: {otp}\n\n"
-            f"This OTP expires in {OTP_EXPIRY_SECONDS // 60} minutes.\n"
-            "If you did not request this, you can ignore this email.\n\n"
-            "SINISTERS SX7"
-        ),
-    }
-
-    resend.Emails.send(params)
+                                                       
+    return send_otp_email(email, username, otp)
 
 @app.route("/login", methods=["GET", "POST"])
 def login_page():
@@ -2112,7 +3144,6 @@ linear-gradient(180deg,#050608,#0a0b0e)}
   <div class="parallax__hero-copy">
     <div class="parallax__eyebrow">SINISTERS SX⁷ • INSTAGRAM WORKSPACE</div>
     <h1>Enter the <em>Instagram</em> workspace.</h1>
-    <p>Move through the layers, then continue below to open your existing Instagram panel or reach the contact page.</p>
     <div class="parallax__actions">
       <a class="parallax__btn primary" href="/panel">◎ OPEN PANEL ↗</a>
       <a class="parallax__btn secondary" href="#portal">SCROLL TO CONTINUE ↓</a>
@@ -2126,13 +3157,12 @@ linear-gradient(180deg,#050608,#0a0b0e)}
     <div class="portal-head">
       <div class="portal-kicker">NEXT</div>
       <h2>Your workspace</h2>
-      <p>The original panel and contact page remain separate, but are now reached naturally after the parallax introduction.</p>
     </div>
     <div class="portal-grid">
       <article class="portal-card">
         <div class="portal-icon">◎</div>
         <h3>Instagram Panel</h3>
-        <p>Open the existing Instagram dashboard without changing its account, bot, group, message, rename, or API functionality.</p>
+        <p>Go to the instagram panel </p>
         <a class="portal-link" href="/panel">OPEN INSTAGRAM PANEL ↗</a>
       </article>
       <article class="portal-card" id="contact-card">
@@ -2218,6 +3248,546 @@ CONTACT_HTML = r"""<!DOCTYPE html>
 </body>
 </html>"""
 
+GC_CREATOR_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SINISTERS SX7 • GC Creator</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Playfair+Display:wght@600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{min-height:100%;background:transparent!important}
+body{min-height:100vh;overflow-x:hidden;color:#eef2ff;font-family:Inter,Arial,sans-serif}
+button,input,textarea{font:inherit}
+#atc-panel-background{position:fixed!important;inset:0!important;width:100vw!important;height:100vh!important;display:block!important;z-index:0!important;background:#000!important;pointer-events:none}
+#atc-panel-overlay{position:fixed!important;inset:0!important;z-index:1!important;pointer-events:none;background:radial-gradient(circle at 50% 0%,rgba(255,255,255,.055),transparent 42%),linear-gradient(180deg,rgba(0,0,0,.08),rgba(0,0,0,.24))}
+.shell{position:relative!important;z-index:2!important;display:flex;min-height:100vh;background:transparent!important}
+.sidebar{width:190px;flex:none;position:fixed;left:0;top:0;bottom:0;padding:18px 12px;background:linear-gradient(180deg,#080b14f2,#090c15f8);border-right:1px solid #193238;z-index:100;display:flex;flex-direction:column}
+ .brand{display:flex;align-items:center;gap:10px;padding:8px 10px 22px}
+ .brand-mark{display:none}
+ .brand-name{font:700 20px 'Share Tech Mono';letter-spacing:2px;color:#99f6e4}
+ .brand-sub{font-size:8px;letter-spacing:3px;color:#94a3b8;margin-top:2px}
+ .nav{display:flex;flex-direction:column;gap:5px}
+ .nav-item{display:flex;align-items:center;gap:10px;padding:10px 11px;border-radius:9px;color:#9aa5bd;font-size:12px;text-decoration:none;border:1px solid transparent}
+ .nav-item:hover,.nav-item.active{color:#fff;background:linear-gradient(90deg,#14b8a61e,#22d3ee08);border-color:#0f766e44}
+ .nav-icon{width:20px;text-align:center;color:#2dd4bf;font-size:15px}
+ .nav-icon img{width:18px;height:18px;display:block;object-fit:contain;margin:auto}
+ .side-bottom{margin-top:auto;border-top:1px solid #193238;padding-top:14px;position:static;text-align:center;color:#64748b;font-size:10px;font-family:Inter,Arial,sans-serif;letter-spacing:2px}
+ .side-bottom strong{display:block;color:#67e8f9;font-size:15px;letter-spacing:1px;margin-bottom:3px}
+ .main{margin-left:190px;width:calc(100% - 190px);padding:20px 24px 34px;max-width:1500px;background:transparent!important}
+ .topbar{display:flex;align-items:center;justify-content:center;text-align:center;padding:14px 0 18px;border-bottom:1px solid rgba(255,255,255,.16);background:rgba(8,10,16,.22);border-radius:0 0 18px 18px}
+.topbar h1{font:700 28px 'Playfair Display';color:#e2e5ea;letter-spacing:3px}
+.topbar h1 span{color:#bfc5ce}
+.topbar p{font-size:9px;color:#909aa2;letter-spacing:2px;margin-top:6px}
+.toolbar{display:flex;justify-content:space-between;align-items:center;margin:20px 0 12px}
+.toolbar h2{font:600 22px 'Playfair Display';color:#eef2ff}
+.btn{border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.055);color:#eee;padding:10px 14px;border-radius:8px;cursor:pointer;font:10px 'Share Tech Mono';letter-spacing:1px;transition:.18s;box-shadow:0 18px 55px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.14);backdrop-filter:blur(10px) saturate(125%);-webkit-backdrop-filter:blur(10px) saturate(125%)}
+.btn:hover{background:rgba(255,255,255,.11);border-color:rgba(255,255,255,.35);box-shadow:0 0 18px rgba(255,255,255,.08)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.btn-add,.btn-save{background:linear-gradient(135deg,rgba(255,255,255,.20),rgba(255,255,255,.07));border-color:rgba(255,255,255,.40)}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
+.card{background:rgba(10,14,20,.28);border:1px solid rgba(255,255,255,.16);border-radius:18px;box-shadow:0 18px 55px rgba(0,0,0,.25),inset 0 1px 0 rgba(255,255,255,.14),inset 0 -1px 0 rgba(255,255,255,.035);backdrop-filter:blur(10px) saturate(125%);-webkit-backdrop-filter:blur(10px) saturate(125%);overflow:hidden;transition:.18s}
+.card:hover{transform:translateY(-2px);border-color:rgba(255,255,255,.30)}
+.card-head{padding:16px;border-bottom:1px solid rgba(255,255,255,.12);display:flex;align-items:center;gap:10px;background:rgba(255,255,255,.055)}
+.dot{width:9px;height:9px;border-radius:50%;background:#d7dce3;box-shadow:0 0 10px rgba(255,255,255,.35)}
+.name{font-weight:800;color:#f1f3f6;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.body{padding:15px}
+.meta{font:9px 'Share Tech Mono';color:#9aa3ad;word-break:break-all;line-height:1.7}
+.actions{display:flex;gap:7px;margin-top:14px}
+.actions .btn{flex:1}
+.empty{text-align:center;padding:80px 20px;border:1px dashed rgba(255,255,255,.18);border-radius:18px;color:#89939d;font:10px 'Share Tech Mono';grid-column:1/-1;background:rgba(0,0,0,.13)}
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.38);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:50;align-items:center;justify-content:center;padding:20px}
+.overlay.open{display:flex}
+.modal{width:680px;max-width:94vw;max-height:92vh;overflow:auto;background:rgba(10,14,20,.82);border:1px solid rgba(255,255,255,.16);border-radius:18px;padding:22px;box-shadow:0 30px 100px rgba(0,0,0,.65),inset 0 1px 0 rgba(255,255,255,.14);backdrop-filter:blur(18px) saturate(125%);-webkit-backdrop-filter:blur(18px)}
+.title{font:18px 'Share Tech Mono';color:#eef2f7;letter-spacing:2px;margin-bottom:16px}
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+.full{grid-column:1/-1}
+.group{display:flex;flex-direction:column;gap:6px}
+.group label{font:9px 'Share Tech Mono';color:#a2aab4;letter-spacing:1px;text-transform:uppercase}
+.group input,.group textarea{width:100%;background:rgba(0,0,0,.20);border:1px solid rgba(255,255,255,.15);color:#eef2ff;border-radius:10px;padding:11px;font:11px 'Share Tech Mono';outline:none;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);transition:.18s}
+.group input:focus,.group textarea:focus{border-color:rgba(255,255,255,.55);box-shadow:0 0 0 3px rgba(255,255,255,.06)}
+.group textarea{min-height:95px;resize:vertical}
+.hint{font:9px 'Share Tech Mono';color:#89939d;line-height:1.5}
+.status{margin-top:12px;color:#d5dae0;font:10px 'Share Tech Mono';min-height:20px}
+.log{margin-top:10px;height:170px;overflow:auto;background:rgba(0,0,0,.18);border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:10px;white-space:pre-wrap;font:9px/1.7 'Share Tech Mono';color:#b5bec8}
+.footer{display:flex;justify-content:flex-end;gap:8px;margin-top:16px;padding-top:14px;border-top:1px solid rgba(255,255,255,.12)}
+@media(max-width:900px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:650px){
+.sidebar{width:58px;padding:10px 7px}.brand{justify-content:center;padding:7px 0 18px}.brand-name,.brand-sub,.nav-label,.side-bottom{display:none}.nav-item{justify-content:center;padding:10px 0}.main{margin-left:58px;width:calc(100% - 58px);padding:16px 12px 28px}.grid{grid-template-columns:1fr}.fields{grid-template-columns:1fr}.full{grid-column:auto}.toolbar{align-items:flex-start;gap:10px}.toolbar h2{font-size:18px}
+}
+</style>
+</head>
+<body>
+<canvas id="atc-panel-background" aria-hidden="true"></canvas>
+<div id="atc-panel-overlay" aria-hidden="true"></div>
+
+<div class="shell">
+<aside class="sidebar">
+  <div class="brand"><div><div class="brand-name">SINISTERS SX7</div><div class="brand-sub">PANEL</div></div></div>
+  <nav class="nav">
+    <a class="nav-item" href="/"><span class="nav-icon"><img src="https://cdn.21st.dev/assets/mirror/99/9963f31f43cd77b0c28981ba7bac04db749a5749019f554d1afb75225a3e9151.png" alt="" aria-hidden="true"></span><span class="nav-label">Home</span></a>
+    <a class="nav-item" href="/instagram"><span class="nav-icon"><img src="https://cdn.21st.dev/assets/mirror/d5/d558230225bb0dd1897db6c7cf0d03b29506eef8078fe25313c48cd8f72d05ad.png" alt="" aria-hidden="true"></span><span class="nav-label">Instagram</span></a>
+    <a class="nav-item" href="/contact"><span class="nav-icon"><img src="https://cdn.21st.dev/assets/mirror/7b/7bb8671183d2a2bbb8a3858b1971cc5699ba0103673b011590d22f0fa309bb87.png" alt="" aria-hidden="true"></span><span class="nav-label">Contact</span></a>
+    <a class="nav-item active" href="/gc-creator"><span class="nav-icon gc-creator-icon">＋</span><span class="nav-label">GC Creator</span></a>
+  </nav>
+  <div class="side-bottom"><div class="side-owner"><strong>SINISTERS SX7</strong>PANEL • v2.0</div></div>
+</aside>
+
+<main class="main">
+  <div class="topbar">
+    <div><h1>SINISTERS <span>SX7</span></h1><p>GC CREATOR • {{ login_username|e }}</p></div>
+  </div>
+
+  <div class="toolbar">
+    <h2>GC Creator IDs</h2>
+    <div style="display:flex;gap:8px">
+      <button class="btn" type="button" onclick="loadIds()">↻ REFRESH</button>
+      <button class="btn btn-add" type="button" onclick="openIdModal()">＋ ADD GC ID</button>
+    </div>
+  </div>
+
+  <div id="ids" class="grid"></div>
+</main>
+</div>
+
+<div class="overlay" id="idModal">
+  <div class="modal">
+    <div class="title" id="idTitle">ADD GC CREATOR ID</div>
+    <div class="fields">
+      <div class="group"><label>ID NAME</label><input id="idName" placeholder="GC ID name" autocomplete="off"></div>
+      <div class="group"><label>PROXY (OPTIONAL)</label><input id="idProxy" placeholder="http://user:pass@ip:port" autocomplete="off"></div>
+      <div class="group full"><label>SESSION ID</label><input id="idSession" type="password" autocomplete="off" placeholder="Paste sessionid"></div>
+    </div>
+    <div class="hint" style="margin-top:9px">The session is stored only for the GC Creator ID and is separate from Instagram IDs.</div>
+    <div class="status" id="idStatus"></div>
+    <div class="footer">
+      <button class="btn" type="button" onclick="closeIdModal()">CANCEL</button>
+      <button class="btn btn-save" type="button" id="saveIdBtn" onclick="saveId()">SAVE ID</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="gcModal">
+  <div class="modal">
+    <div class="title">CREATE GROUP CHATS</div>
+    <div class="hint" id="selectedIdHint"></div>
+    <div class="fields" style="margin-top:14px">
+      <div class="group"><label>GCs TO CREATE</label><input id="gcCount" type="number" min="1" max="50" value="1"></div>
+      <div class="group"><label>REMOVE USERNAME</label><input id="removeUser" placeholder="username" autocomplete="off"></div>
+      <div class="group full"><label>USERNAMES</label><textarea id="users" placeholder="user1, user2, user3"></textarea><div class="hint">Comma separated. Minimum 2 users.</div></div>
+      <div class="group full"><label>TEXT TO SEND AFTER CREATION (OPTIONAL)</label><textarea id="gcMessage" placeholder="Enter the message to send in each newly created group..."></textarea><div class="hint">The text is sent to the newly created group after the selected user is removed.</div></div>
+    </div>
+    <div class="status" id="gcStatus"></div>
+    <div class="log" id="gcLog"></div>
+    <div class="footer">
+      <button class="btn" type="button" onclick="closeGCModal()">CANCEL</button>
+      <button class="btn btn-save" type="button" id="createBtn" onclick="createGCs()">CREATE GCs</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let ids={};
+let editingId=null;
+let selectedId=null;
+let poller=null;
+
+function esc(s){
+  return String(s ?? '').replace(/[&<>"']/g,m=>({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[m]));
+}
+
+async function apiJSON(url, options={}){
+  const r=await fetch(url,options);
+  let d={};
+  try{d=await r.json()}catch(_){}
+  if(!r.ok && !d.error) d.error=`Request failed (${r.status})`;
+  return d;
+}
+
+async function loadIds(){
+  const el=document.getElementById('ids');
+  try{
+    const d=await apiJSON('/api/gc-creator/ids');
+    if(d && !Array.isArray(d) && typeof d==='object' && !d.error){
+      ids=d;
+      renderIds();
+    }else{
+      el.innerHTML='<div class="empty">COULD NOT LOAD GC CREATOR IDS</div>';
+    }
+  }catch(e){
+    el.innerHTML='<div class="empty">NETWORK ERROR WHILE LOADING IDS</div>';
+  }
+}
+
+function renderIds(){
+  const el=document.getElementById('ids');
+  const keys=Object.keys(ids||{});
+  if(!keys.length){
+    el.innerHTML='<div class="empty">NO GC CREATOR IDS ADDED YET</div>';
+    return;
+  }
+  el.innerHTML=keys.map(id=>{
+    const x=ids[id]||{};
+    return `<article class="card">
+      <div class="card-head"><span class="dot"></span><div class="name">${esc(x.name||id)}</div></div>
+      <div class="body">
+        <div class="meta">SESSION SAVED •••••••••••••••<br>${x.proxy?`PROXY • ${esc(x.proxy)}`:'DIRECT CONNECTION'}</div>
+        <div class="actions">
+          <button class="btn btn-save" type="button" data-action="start" data-id="${esc(id)}">START</button>
+          <button class="btn" type="button" data-action="edit" data-id="${esc(id)}">EDIT</button>
+          <button class="btn" type="button" data-action="remove" data-id="${esc(id)}">REMOVE</button>
+        </div>
+      </div>
+    </article>`;
+  }).join('');
+}
+
+function openIdModal(){
+  editingId=null;
+  document.getElementById('idTitle').textContent='ADD GC CREATOR ID';
+  document.getElementById('idName').value='';
+  document.getElementById('idSession').value='';
+  document.getElementById('idProxy').value='';
+  document.getElementById('idStatus').textContent='';
+  document.getElementById('saveIdBtn').disabled=false;
+  document.getElementById('idModal').classList.add('open');
+  setTimeout(()=>document.getElementById('idName').focus(),50);
+}
+
+function openEditModal(id){
+  const x=ids[id];
+  if(!x){alert('GC Creator ID not found');return}
+  editingId=id;
+  document.getElementById('idTitle').textContent='EDIT GC CREATOR ID';
+  document.getElementById('idName').value=x.name||'';
+  document.getElementById('idSession').value=x.session_id||'';
+  document.getElementById('idProxy').value=x.proxy||'';
+  document.getElementById('idStatus').textContent='';
+  document.getElementById('saveIdBtn').disabled=false;
+  document.getElementById('idModal').classList.add('open');
+  setTimeout(()=>document.getElementById('idName').focus(),50);
+}
+
+function closeIdModal(){
+  document.getElementById('idModal').classList.remove('open');
+  editingId=null;
+}
+
+async function saveId(){
+  const body={
+    name:document.getElementById('idName').value.trim(),
+    session_id:document.getElementById('idSession').value.trim(),
+    proxy:document.getElementById('idProxy').value.trim()
+  };
+  const status=document.getElementById('idStatus');
+  const btn=document.getElementById('saveIdBtn');
+
+  if(!body.name){status.textContent='ID name is required.';return}
+  if(!body.session_id){status.textContent='Session ID is required.';return}
+
+  btn.disabled=true;
+  status.textContent='Saving...';
+
+  try{
+    const url=editingId?`/api/gc-creator/ids/${encodeURIComponent(editingId)}`:'/api/gc-creator/ids';
+    const method=editingId?'PUT':'POST';
+    const d=await apiJSON(url,{
+      method,
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)
+    });
+    if(!d.success){
+      status.textContent=d.error||'Save failed.';
+      btn.disabled=false;
+      return;
+    }
+    closeIdModal();
+    await loadIds();
+  }catch(e){
+    status.textContent='Network error. Please try again.';
+    btn.disabled=false;
+  }
+}
+
+async function deleteId(id){
+  if(!ids[id])return;
+  if(!confirm(`Delete "${ids[id].name||id}"?`))return;
+  try{
+    const d=await apiJSON(`/api/gc-creator/ids/${encodeURIComponent(id)}`,{method:'DELETE'});
+    if(!d.success){alert(d.error||'Delete failed');return}
+    if(selectedId===id)closeGCModal();
+    await loadIds();
+  }catch(e){
+    alert('Network error while deleting.');
+  }
+}
+
+function openGCModal(id){
+  if(!ids[id]){alert('GC Creator ID not found');return}
+  selectedId=id;
+  document.getElementById('selectedIdHint').textContent='Using saved session: '+(ids[id]?.name||id);
+  document.getElementById('gcCount').value=1;
+  document.getElementById('removeUser').value='';
+  document.getElementById('users').value='';
+  document.getElementById('gcMessage').value='';
+  document.getElementById('gcStatus').textContent='';
+  document.getElementById('gcLog').textContent='';
+  document.getElementById('createBtn').disabled=false;
+  document.getElementById('gcModal').classList.add('open');
+  setTimeout(()=>document.getElementById('users').focus(),50);
+}
+
+function closeGCModal(){
+  document.getElementById('gcModal').classList.remove('open');
+  if(poller){clearInterval(poller);poller=null}
+  document.getElementById('createBtn').disabled=false;
+}
+
+async function createGCs(){
+  const count=Number(document.getElementById('gcCount').value);
+  const users=document.getElementById('users').value.split(',').map(x=>x.trim().replace(/^@/,'')).filter(Boolean);
+  const remove=document.getElementById('removeUser').value.trim().replace(/^@/,'');
+  const message=document.getElementById('gcMessage').value;
+  const status=document.getElementById('gcStatus');
+  const button=document.getElementById('createBtn');
+
+  if(!selectedId){status.textContent='Select a GC Creator ID first.';return}
+  if(!Number.isInteger(count)||count<1||count>50){status.textContent='GC count must be between 1 and 50.';return}
+  if(users.length<2){status.textContent='Enter at least 2 usernames.';return}
+  if(!remove){status.textContent='Enter the username to remove.';return}
+  if(!users.includes(remove)){status.textContent='Remove username must be one of the entered members.';return}
+
+  button.disabled=true;
+  status.textContent='Starting...';
+  document.getElementById('gcLog').textContent='';
+
+  try{
+    const d=await apiJSON('/api/gc-creator/start',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        gc_id:selectedId,
+        group_count:count,
+        usernames:users,
+        remove_username:remove,
+        message:message
+      })
+    });
+
+    if(!d.success){
+      status.textContent=d.error||'Could not start.';
+      button.disabled=false;
+      return;
+    }
+    pollJob(d.job_id);
+  }catch(e){
+    status.textContent='Network error.';
+    button.disabled=false;
+  }
+}
+
+function pollJob(job){
+  if(poller)clearInterval(poller);
+
+  const poll=async()=>{
+    try{
+      const d=await apiJSON(`/api/gc-creator/status/${encodeURIComponent(job)}`);
+      if(!d.success){
+        document.getElementById('gcStatus').textContent=d.error||'Could not read job status.';
+        return;
+      }
+
+      document.getElementById('gcStatus').textContent=
+        d.running?`Running • ${d.done}/${d.total}`:
+        d.error?`Failed • ${d.done}/${d.total}`:
+        `Completed • ${d.done}/${d.total}`;
+
+      document.getElementById('gcLog').textContent=(d.logs||[]).join('\n');
+
+      if(!d.running){
+        clearInterval(poller);
+        poller=null;
+        document.getElementById('createBtn').disabled=false;
+      }
+    }catch(e){
+      document.getElementById('gcStatus').textContent='Network error while checking job.';
+    }
+  };
+
+  poll();
+  poller=setInterval(poll,1500);
+}
+
+document.getElementById('idModal').addEventListener('click',e=>{
+  if(e.target===e.currentTarget)closeIdModal();
+});
+document.getElementById('gcModal').addEventListener('click',e=>{
+  if(e.target===e.currentTarget)closeGCModal();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    if(document.getElementById('idModal').classList.contains('open'))closeIdModal();
+    if(document.getElementById('gcModal').classList.contains('open'))closeGCModal();
+  }
+});
+
+document.getElementById('ids').addEventListener('click',function(e){
+  const button=e.target.closest('button[data-action]');
+  if(!button)return;
+  const id=button.dataset.id;
+  if(!id)return;
+  const action=button.dataset.action;
+  if(action==='start')openGCModal(id);
+  else if(action==='edit')openEditModal(id);
+  else if(action==='remove')deleteId(id);
+});
+
+loadIds();
+</script>
+
+<script>
+(function(){
+  const canvas=document.getElementById('atc-panel-background');
+  if(!canvas)return;
+
+  const gl=canvas.getContext('webgl2',{premultipliedAlpha:false,antialias:false});
+  if(!gl)return;
+
+  const vertSrc=`#version 300 es
+  precision highp float;
+  layout(location=0) in vec2 a_pos;
+  void main(){ gl_Position=vec4(a_pos,0.0,1.0); }`;
+
+  const fragSrc=`#version 300 es
+  precision highp float;
+  out vec4 fragColor;
+  uniform vec2 u_res;
+  uniform float u_time;
+
+  float tanh1(float x){
+    float e=exp(2.0*x);
+    return(e-1.0)/(e+1.0);
+  }
+  vec4 tanh4(vec4 v){
+    return vec4(tanh1(v.x),tanh1(v.y),tanh1(v.z),tanh1(v.w));
+  }
+
+  void main(){
+    vec3 FC=vec3(gl_FragCoord.xy,0.0);
+    vec3 r=vec3(u_res,max(u_res.x,u_res.y));
+    float t=u_time;
+    vec4 o=vec4(0.0);
+    vec3 p=vec3(0.0);
+    vec3 v=vec3(1.0,2.0,6.0);
+    float i=0.0,z=1.0,d=1.0,f=1.0;
+
+    for(;i++<28.0;o.rgb+=(cos((p.x+z+v)*0.1)+1.0)/d/f/z){
+      p=z*normalize(FC*2.0-r.xyy);
+      vec4 m=cos((p+sin(p)).y*0.4+vec4(0.0,33.0,11.0,0.0));
+      p.xz=mat2(m)*p.xz;
+      p.x+=t/0.55;
+      z+=(d=length(cos(p/v)*v+v.zxx/7.0)/(f=2.0+d/exp(p.y*0.2)));
+    }
+
+    o=tanh4(0.2*o);
+    o.a=1.0;
+    fragColor=o;
+  }`;
+
+  function compile(type,src){
+    const sh=gl.createShader(type);
+    gl.shaderSource(sh,src);
+    gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh,gl.COMPILE_STATUS)){
+      console.error(gl.getShaderInfoLog(sh)||'ATC shader compile error');
+      return null;
+    }
+    return sh;
+  }
+
+  const vs=compile(gl.VERTEX_SHADER,vertSrc);
+  const fs=compile(gl.FRAGMENT_SHADER,fragSrc);
+  if(!vs||!fs)return;
+
+  const prog=gl.createProgram();
+  gl.attachShader(prog,vs);
+  gl.attachShader(prog,fs);
+  gl.linkProgram(prog);
+  if(!gl.getProgramParameter(prog,gl.LINK_STATUS)){
+    console.error(gl.getProgramInfoLog(prog)||'ATC shader link error');
+    return;
+  }
+
+  gl.useProgram(prog);
+
+  const buf=gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER,buf);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([
+    -1,-1,1,-1,-1,1,
+    -1,1,1,-1,1,1
+  ]),gl.STATIC_DRAW);
+
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+
+  const uRes=gl.getUniformLocation(prog,'u_res');
+  const uTime=gl.getUniformLocation(prog,'u_time');
+
+  function resize(){
+    const dpr=Math.max(1,Math.min(2,window.devicePixelRatio||1));
+    const w=Math.max(1,Math.floor(window.innerWidth*dpr));
+    const h=Math.max(1,Math.floor(window.innerHeight*dpr));
+    if(canvas.width!==w||canvas.height!==h){
+      canvas.width=w;
+      canvas.height=h;
+    }
+    gl.viewport(0,0,w,h);
+    gl.uniform2f(uRes,w,h);
+  }
+
+  addEventListener('resize',resize,{passive:true});
+  resize();
+
+  let raf=0,t0=performance.now(),lastFrame=0;
+  const frameInterval=1000/30;
+
+  function draw(now=performance.now()){
+    if(document.hidden){raf=0;return}
+    if(now-lastFrame>=frameInterval){
+      lastFrame=now;
+      gl.uniform1f(uTime,(now-t0)/1000);
+      gl.drawArrays(gl.TRIANGLES,0,6);
+    }
+    raf=requestAnimationFrame(draw);
+  }
+
+  draw();
+  document.addEventListener('visibilitychange',()=>{
+    if(!document.hidden&&!raf)draw();
+  });
+  addEventListener('beforeunload',()=>cancelAnimationFrame(raf));
+})();
+</script>
+</body>
+</html>"""
+
+
+@app.route("/data")
+@login_required
+def data_page():
+    with data_lock:
+        d = load_data()
+    return jsonify(d)
+
+
+@app.route("/gc-creator")
+@login_required
+def gc_creator_page():
+    return render_template_string(GC_CREATOR_HTML, login_username=session.get("login_username", ""))
+
 @app.route("/contact")
 @login_required
 def contact_page():
@@ -2231,8 +3801,8 @@ def home_page():
         users = [
             {
                 "name": name,
-                # Keep existing accounts working even if they were registered
-                # before the timer field was added.
+                                                                             
+                                                   
                 "created_at_epoch": float(
                     user.get("created_at_epoch", 0) or 0
                 )
@@ -2254,10 +3824,10 @@ def home_alias():
 @app.route("/panel")
 @login_required
 def panel_page():
-    # User uptime is anchored to the permanent registration timestamp.
-    # It is not affected by login/logout, password reset, panel refresh, or
-    # starting/stopping Instagram IDs. The anchor is removed only when the
-    # registered user itself is deleted.
+                                                                      
+                                                                           
+                                                                          
+                                        
     login_username = session.get("login_username", "")
     login_role = session.get("login_role", "user")
     user_created_at_epoch = 0
@@ -2433,7 +4003,14 @@ def start_bot(acc_id):
             return jsonify({"success": False, "error": "Bot did not stop in time, please wait a moment"})
     stop_event = threading.Event()
     bot_stop[acc_id] = stop_event
-    t = threading.Thread(target=bot_worker, args=(acc_id, acc, stop_event), daemon=True)
+    method = acc.get("method", "INSTAGRAPI")
+    if method == "AYAN MULTI GC":
+        worker = ayaan_multi_gc_worker
+    elif method == "RAVAN MULTI GC":
+        worker = ravan_multi_gc_worker
+    else:
+        worker = ravan_worker if method == "RAVAN" else bot_worker
+    t = threading.Thread(target=worker, args=(acc_id, acc, stop_event), daemon=True)
     bot_threads[acc_id] = t
     t.start()
     return jsonify({"success": True})
@@ -2483,6 +4060,127 @@ def all_status():
         result[acc_id] = s
     return jsonify(result)
 
+
+@app.route("/api/gc-creator/ids", methods=["GET"])
+@login_required
+def get_gc_creator_ids():
+    with data_lock:
+        d = load_data()
+        ids = d.get("gc_creator_ids", {})
+        if session.get("login_role") == "admin":
+            visible = ids
+        else:
+            owner = current_owner()
+            visible = {k: v for k, v in ids.items() if v.get("owner") == owner}
+    return jsonify({k: {"name": v.get("name", ""), "session_id": v.get("session_id", ""), "proxy": v.get("proxy", "")} for k, v in visible.items()})
+
+@app.route("/api/gc-creator/ids", methods=["POST"])
+@login_required
+def add_gc_creator_id():
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("name") or "").strip()
+    session_id = str(body.get("session_id") or "").strip()
+    proxy = str(body.get("proxy") or "").strip()
+    if not name:
+        return jsonify({"success": False, "error": "ID name is required"}), 400
+    if not session_id:
+        return jsonify({"success": False, "error": "Session ID is required"}), 400
+    gc_id = str(uuid.uuid4().hex)
+    with data_lock:
+        d = load_data()
+        d.setdefault("gc_creator_ids", {})[gc_id] = {
+            "name": name, "owner": current_owner(), "session_id": session_id, "proxy": proxy
+        }
+        save_data(d)
+    return jsonify({"success": True, "id": gc_id})
+
+@app.route("/api/gc-creator/ids/<gc_id>", methods=["PUT"])
+@login_required
+def update_gc_creator_id(gc_id):
+    body = request.get_json(silent=True) or {}
+    with data_lock:
+        d = load_data()
+        item = d.get("gc_creator_ids", {}).get(gc_id)
+        if not item or (session.get("login_role") != "admin" and item.get("owner") != current_owner()):
+            return jsonify({"success": False, "error": "Not found"}), 404
+        if "name" in body and str(body["name"]).strip(): item["name"] = str(body["name"]).strip()
+        if "proxy" in body: item["proxy"] = str(body.get("proxy") or "").strip()
+        if "session_id" in body and str(body["session_id"]).strip():
+            item["session_id"] = str(body["session_id"]).strip()
+            item.pop("session_settings", None)
+            ig_clients.pop(f"gc:{gc_id}", None)
+        save_data(d)
+    return jsonify({"success": True})
+
+@app.route("/api/gc-creator/ids/<gc_id>", methods=["DELETE"])
+@login_required
+def delete_gc_creator_id(gc_id):
+    with data_lock:
+        d = load_data()
+        item = d.get("gc_creator_ids", {}).get(gc_id)
+        if not item or (session.get("login_role") != "admin" and item.get("owner") != current_owner()):
+            return jsonify({"success": False, "error": "Not found"}), 404
+        d["gc_creator_ids"].pop(gc_id, None)
+        save_data(d)
+    ig_clients.pop(f"gc:{gc_id}", None)
+    return jsonify({"success": True})
+
+@app.route("/api/gc-creator/start", methods=["POST"])
+@login_required
+def start_gc_creator():
+    body = request.get_json(silent=True) or {}
+    gc_id = str(body.get("gc_id") or "").strip()
+    try:
+        group_count = int(body.get("group_count") or 0)
+    except Exception:
+        group_count = 0
+    usernames = body.get("usernames") or []
+    if not isinstance(usernames, list): usernames = []
+    usernames = [str(x).strip().lstrip("@") for x in usernames if str(x).strip()]
+    remove_username = str(body.get("remove_username") or "").strip().lstrip("@")
+    message_text = str(body.get("message") or "")
+    with data_lock:
+        d = load_data()
+        item = d.get("gc_creator_ids", {}).get(gc_id)
+        if not item or (session.get("login_role") != "admin" and item.get("owner") != current_owner()):
+            return jsonify({"success": False, "error": "GC Creator ID not found"}), 404
+    if group_count < 1 or group_count > 50:
+        return jsonify({"success": False, "error": "GC count must be between 1 and 50"}), 400
+    if len(usernames) < 2:
+        return jsonify({"success": False, "error": "Minimum 2 usernames required"}), 400
+    if not remove_username:
+        return jsonify({"success": False, "error": "Remove username is required"}), 400
+    if remove_username not in usernames:
+        return jsonify({"success": False, "error": "Remove username must be one of the entered members"}), 400
+    with gc_creator_lock:
+        for job in gc_creator_jobs.values():
+            if job.get("running") and job.get("gc_id") == gc_id:
+                return jsonify({"success": False, "error": "GC Creator is already running for this ID"}), 409
+        job_id = uuid.uuid4().hex
+        gc_creator_jobs[job_id] = {"running": True, "done": 0, "total": group_count, "logs": [], "error": "", "gc_id": gc_id}
+    threading.Thread(
+        target=gc_creator_worker,
+        args=(job_id, gc_id, group_count, usernames, remove_username, message_text),
+        daemon=True
+    ).start()
+    return jsonify({"success": True, "job_id": job_id})
+
+@app.route("/api/gc-creator/status/<job_id>")
+@login_required
+def gc_creator_status(job_id):
+    with gc_creator_lock:
+        job = gc_creator_jobs.get(job_id)
+        if not job: return jsonify({"success": False, "error": "Job not found"}), 404
+        gc_id = job.get("gc_id")
+    with data_lock:
+        d = load_data()
+        item = d.get("gc_creator_ids", {}).get(gc_id)
+        if not item or (session.get("login_role") != "admin" and item.get("owner") != current_owner()):
+            return jsonify({"success": False, "error": "Access denied"}), 403
+    with gc_creator_lock:
+        job = dict(gc_creator_jobs.get(job_id, {}))
+    return jsonify({"success": True, "running": bool(job.get("running")), "done": int(job.get("done", 0)), "total": int(job.get("total", 0)), "logs": list(job.get("logs", [])), "error": job.get("error", "")})
+
 @app.route("/api/fetch-groups", methods=["POST"])
 @login_required
 def fetch_groups():
@@ -2499,29 +4197,10 @@ def fetch_groups():
         }), 400
 
     try:
-        # ---------------------------------------------------------
-        # IMPORTANT:
-        # fetch_temp must NEVER reuse a previously cached client.
-        # This ensures every new Session ID gets its own login.
-        # ---------------------------------------------------------
-        if acc_id == "fetch_temp":
-
-            # Remove any stale temporary client from memory
-            old_client = ig_clients.pop("fetch_temp", None)
-
-            # Create a completely fresh Instagrapi client
-            cl = Client()
-
-            if proxy:
-                cl.set_proxy(proxy)
-
-            # Login using THIS session ID
-            cl.login_by_sessionid(
-                decode_session(session_id)
-            )
-
+        # RAVAN uses the same working fetch implementation supplied by the user.
+        if body.get("method") in ("RAVAN", "RAVAN MULTI GC"):
+            groups = ravan_fetch_groups(session_id, proxy)
         else:
-            # Existing saved account: use the normal client cache
             if acc_id in ig_clients:
                 cl = ig_clients[acc_id]
             else:
@@ -2531,31 +4210,21 @@ def fetch_groups():
                     proxy
                 )
 
-        # ---------------------------------------------------------
-        # Fetch Instagram DM threads
-        # ---------------------------------------------------------
-        threads = cl.direct_threads(amount=50)
+            threads = cl.direct_threads(amount=50)
+            groups = []
 
-        # Keep only group conversations
-        groups = []
+            for t in threads:
+                if t.is_group:
+                    groups.append({
+                        "id": str(t.id),
+                        "name": t.thread_title or str(t.id)
+                    })
 
-        for t in threads:
-            if t.is_group:
-                groups.append({
-                    "id": str(t.id),
-                    "name": t.thread_title or str(t.id)
-                })
-
-        # Save settings only for permanent accounts.
-        # Do NOT save the temporary fetch client.
-        if acc_id != "fetch_temp":
-            try:
-                persist_client_settings(
-                    acc_id,
-                    cl
-                )
-            except Exception:
-                pass
+            if acc_id != "fetch_temp":
+                try:
+                    persist_client_settings(acc_id, cl)
+                except Exception:
+                    pass
 
         return jsonify({
             "success": True,
@@ -2563,9 +4232,6 @@ def fetch_groups():
         })
 
     except Exception as e:
-
-        # Make sure a failed temporary fetch cannot
-        # leave an old client behind.
         if acc_id == "fetch_temp":
             ig_clients.pop("fetch_temp", None)
         else:
@@ -2576,7 +4242,8 @@ def fetch_groups():
             "error": str(e)
         }), 400
 
-                                           
+
+
 SELF_URL = (os.getenv("SELF_URL") or os.getenv("PUBLIC_URL") or "").strip()
 SELF_PING_INTERVAL = 120
 
@@ -2603,4 +4270,4 @@ if __name__ == "__main__":
         threading.Thread(target=self_ping_worker, daemon=True).start()
     logging.getLogger("werkzeug").disabled = True
     logging.getLogger("gunicorn.access").disabled = True
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)  
