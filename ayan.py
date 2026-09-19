@@ -3,6 +3,7 @@ from flask import Flask, request, jsonify, session, redirect, url_for, render_te
 import logging
 from functools import wraps
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 from email.message import EmailMessage
 from instagrapi import Client
 from instagrapi.exceptions import LoginRequired, RateLimitError
@@ -83,6 +84,11 @@ def send_otp_email(to_email, username, otp):
 
 app = Flask(__name__)
 
+# Render (and other reverse-proxy deployments) terminates HTTPS before forwarding
+# the request to Flask. Trust the standard single-proxy forwarding headers so
+# request.host_url reflects the public HTTPS URL used by the browser.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
 # Security configuration: all secrets must be supplied through environment variables.
 PANEL_SECRET_KEY = os.environ.get("PANEL_SECRET_KEY", "").strip()
 PANEL_USERNAME = os.environ.get("PANEL_USERNAME", "SINISTERS").strip()
@@ -130,10 +136,35 @@ def request_security_checks():
         origin = request.headers.get("Origin")
         referer = request.headers.get("Referer")
         host = request.host_url.rstrip("/")
-        if origin and origin.rstrip("/") != host:
-            return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
-        if not origin and referer and not referer.startswith(host + "/"):
-            return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
+
+        # Compare the browser's origin against the effective public host.
+        # Render may forward HTTPS requests to Flask over HTTP, so comparing
+        # the complete URL string can incorrectly reject legitimate requests.
+        if origin:
+            from urllib.parse import urlsplit
+            origin_parts = urlsplit(origin)
+            host_parts = urlsplit(host)
+            origin_host = (origin_parts.hostname or "").lower()
+            request_host = (host_parts.hostname or "").lower()
+            origin_port = origin_parts.port
+            request_port = host_parts.port
+
+            # Default ports are equivalent to an omitted port.
+            if origin_port is None:
+                origin_port = 443 if origin_parts.scheme == "https" else 80
+            if request_port is None:
+                request_port = 443 if host_parts.scheme == "https" else 80
+
+            if origin_host != request_host or origin_port != request_port:
+                return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
+
+        if not origin and referer:
+            referer_parts = urlsplit(referer)
+            host_parts = urlsplit(host)
+            if ((referer_parts.hostname or "").lower() != (host_parts.hostname or "").lower()
+                    or (referer_parts.port or (443 if referer_parts.scheme == "https" else 80))
+                    != (host_parts.port or (443 if host_parts.scheme == "https" else 80))):
+                return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
         if not origin and not referer and request.path.startswith("/api/"):
             return jsonify({"success": False, "error": "Request origin required"}), 403
 
@@ -1801,7 +1832,9 @@ input,textarea,select,.search{
       <h1>SINISTERS <span>SX7</span></h1>
       <div class="logged-user">YOUR USERNAME • <b>{{ login_username }}</b></div>
     </div>
-
+    <div class="top-actions">
+      <button class="btn" onclick="loadAccounts()">↻ REFRESH</button>
+    </div>
   </div>
   <section class="stats">
     <div class="stat-card"><div><div class="stat-label">Total IDs</div><div class="stat-number" id="h-accounts">0</div></div></div>
@@ -4041,7 +4074,7 @@ def home_page():
             for name, user in d.get("users", {}).items()
         ]
         users.sort(key=lambda u: u["name"].lower())
-    owners = ["AYAN", "RAVAN", "ARYAN", "PREDATOR", "SCAR"]
+    owners = ["AYAN", "ARYAN", "SCAR", "PREDATOR"]
     visible_users = users if session.get("login_role") == "admin" else []
     return render_template_string(HOME_HTML, users=visible_users, user_count=len(visible_users),
                                   owners=owners,
