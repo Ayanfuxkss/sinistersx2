@@ -128,46 +128,6 @@ def security_headers(response):
     response.headers["Cache-Control"] = "no-store" if request.path.startswith("/api/") or request.path in ("/login", "/") else response.headers.get("Cache-Control", "no-cache")
     return response
 
-@app.before_request
-def request_security_checks():
-    # Reject cross-site state-changing requests. Browser fetch/XHR sends Origin;
-    # normal form navigation sends Referer. Login/registration are intentionally exempt.
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.path not in {"/login", "/register/request-otp", "/register/verify-otp"}:
-        origin = request.headers.get("Origin")
-        referer = request.headers.get("Referer")
-        host = request.host_url.rstrip("/")
-
-        # Compare the browser's origin against the effective public host.
-        # Render may forward HTTPS requests to Flask over HTTP, so comparing
-        # the complete URL string can incorrectly reject legitimate requests.
-        if origin:
-            from urllib.parse import urlsplit
-            origin_parts = urlsplit(origin)
-            host_parts = urlsplit(host)
-            origin_host = (origin_parts.hostname or "").lower()
-            request_host = (host_parts.hostname or "").lower()
-            origin_port = origin_parts.port
-            request_port = host_parts.port
-
-            # Default ports are equivalent to an omitted port.
-            if origin_port is None:
-                origin_port = 443 if origin_parts.scheme == "https" else 80
-            if request_port is None:
-                request_port = 443 if host_parts.scheme == "https" else 80
-
-            if origin_host != request_host or origin_port != request_port:
-                return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
-
-        if not origin and referer:
-            referer_parts = urlsplit(referer)
-            host_parts = urlsplit(host)
-            if ((referer_parts.hostname or "").lower() != (host_parts.hostname or "").lower()
-                    or (referer_parts.port or (443 if referer_parts.scheme == "https" else 80))
-                    != (host_parts.port or (443 if host_parts.scheme == "https" else 80))):
-                return jsonify({"success": False, "error": "Cross-site request blocked"}), 403
-        if not origin and not referer and request.path.startswith("/api/"):
-            return jsonify({"success": False, "error": "Request origin required"}), 403
-
     ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
     if request.path == "/login" and request.method == "POST":
         if not _rate_limit(f"login:{ip}", 10, 300):
