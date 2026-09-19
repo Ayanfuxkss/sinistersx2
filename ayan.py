@@ -1801,9 +1801,7 @@ input,textarea,select,.search{
       <h1>SINISTERS <span>SX7</span></h1>
       <div class="logged-user">YOUR USERNAME • <b>{{ login_username }}</b></div>
     </div>
-    <div class="top-actions">
-      <button class="btn" onclick="loadAccounts()">↻ REFRESH</button>
-    </div>
+
   </div>
   <section class="stats">
     <div class="stat-card"><div><div class="stat-label">Total IDs</div><div class="stat-number" id="h-accounts">0</div></div></div>
@@ -4043,7 +4041,7 @@ def home_page():
             for name, user in d.get("users", {}).items()
         ]
         users.sort(key=lambda u: u["name"].lower())
-    owners = ["AYAN", "ARYAN", "SCAR", "PREDATOR"]
+    owners = ["AYAN", "RAVAN", "ARYAN", "PREDATOR", "SCAR"]
     visible_users = users if session.get("login_role") == "admin" else []
     return render_template_string(HOME_HTML, users=visible_users, user_count=len(visible_users),
                                   owners=owners,
