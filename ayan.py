@@ -427,10 +427,47 @@ if ('scrollRestoration' in history) {
 
 
 
-DATA_DIR = "data"
-DATA_FILE = os.path.join(DATA_DIR, "data.json")
-os.makedirs(DATA_DIR, exist_ok=True)
-data_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Supabase persistence
+# ---------------------------------------------------------------------------
+# The application state is stored in Supabase instead of creating data/data.json.
+# Expected table: app_state
+# Columns: id (text), data (jsonb), updated_at (timestamptz, optional/default now())
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip()
+SUPABASE_TABLE = os.environ.get("SUPABASE_TABLE", "app_state").strip() or "app_state"
+SUPABASE_ROW_ID = os.environ.get("SUPABASE_ROW_ID", "main").strip() or "main"
+
+if not SUPABASE_URL:
+    raise RuntimeError("SUPABASE_URL must be set in the environment.")
+if not SUPABASE_KEY:
+    raise RuntimeError("SUPABASE_KEY must be set in the environment.")
+
+data_lock = threading.RLock()
+
+def _supabase_request(method, path, payload=None):
+    url = f"{SUPABASE_URL}/rest/v1/{path}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal, resolution=merge-duplicates",
+    }
+    body = None if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            if not raw:
+                return None
+            return json.loads(raw)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase error (HTTP {exc.code}): {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Supabase connection error: {exc.reason}") from exc
+
 
 def _enc(value):
     raw = json.dumps(value, separators=(",", ":")).encode("utf-8") if not isinstance(value, str) else value.encode("utf-8")
@@ -475,25 +512,34 @@ def _unprotect_data(d):
     return d
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, encoding="utf-8") as f:
-            return _unprotect_data(json.load(f))
+    """Load the single application-state row from Supabase."""
+    protected = _supabase_request(
+        "GET",
+        f"{SUPABASE_TABLE}?id=eq.{urllib.parse.quote(SUPABASE_ROW_ID, safe='')}&select=data&limit=1",
+    )
+    if isinstance(protected, list) and protected:
+        row_data = protected[0].get("data")
+        if isinstance(row_data, dict):
+            return _unprotect_data(row_data)
     return {"accounts": {}, "users": {}, "gc_creator_ids": {}}
 
 def save_data(d):
+    """Persist the complete application state to Supabase.
+
+    Sensitive Instagram session fields are still Fernet-encrypted by
+    _protect_data() before they leave the process. No local data file is
+    created or modified.
+    """
     protected = _protect_data(d)
-    tmp = DATA_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(protected, f, indent=2)
-    try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        pass
-    os.replace(tmp, DATA_FILE)
-    try:
-        os.chmod(DATA_FILE, 0o600)
-    except OSError:
-        pass
+    payload = {
+        "id": SUPABASE_ROW_ID,
+        "data": protected,
+    }
+    _supabase_request(
+        "POST",
+        f"{SUPABASE_TABLE}?on_conflict=id",
+        payload,
+    )
 
 
 def current_owner():
