@@ -591,7 +591,7 @@ def gc_creator_worker(job_id, gc_id, group_count, usernames, remove_username, me
                 job["logs"].append(f"[{time.strftime('%H:%M:%S')}] {message}")
                 job["logs"] = job["logs"][-100:]
 
-    sock = None
+    cl = None
 
     try:
         with data_lock:
@@ -605,60 +605,95 @@ def gc_creator_worker(job_id, gc_id, group_count, usernames, remove_username, me
             raise RuntimeError("This GC Creator ID has no session ID")
 
         proxy = acc.get("proxy", "").strip() or None
+        session_id = decode_session(session_id)
 
-        sock_kwargs = {
-            "sessionid": decode_session(session_id)
-        }
+        cl = Client()
         if proxy:
-            sock_kwargs["proxy"] = proxy
+            cl.set_proxy(proxy)
+        cl.login_by_sessionid(session_id)
 
-        sock = make_ig_web_socket(**sock_kwargs)
-        sock.connect()
+        try:
+            user_ids = [
+                cl.user_id_from_username(username)
+                for username in usernames
+            ]
+            remove_user_id = cl.user_id_from_username(remove_username)
+        except Exception as e:
+            add_gc_log(f"❌ Username resolve failed → {e}")
+            return
 
-        members_display = ", ".join(usernames)
+        add_gc_log(f"\n⚡ Creating {group_count} Gcs\n")
 
-        for group_number in range(1, group_count + 1):
-            time.sleep(2)
-
+        for i in range(1, group_count + 1):
             try:
-                result = sock.create_group(
-                    usernames,
-                    first_message=message_text,
-                    diagnose=True
+                add_gc_log(f"🌼 GC {i}/{group_count}")
+
+                cl.direct_send(
+                    message_text,
+                    user_ids=user_ids
                 )
 
-                if not result.get("ok"):
-                    add_gc_log(f"GC {group_number} : CREATION FAILED")
-                    continue
+                time.sleep(4)
 
-                thread_id = result["thread_id"]
+                thread = cl.direct_threads(
+                    amount=1
+                )[0]
 
-                add_gc_log(f"GC {group_number} : CREATED 🤍 - {members_display}")
-                add_gc_log("       SENT 📨")
+                thread_id = thread.id
 
-                time.sleep(1)
+                time.sleep(3)
 
-                if remove_username:
-                    remove_result = sock.remove_group_member(
-                        thread_id,
-                        remove_username
-                    )
+                cl.private.post(
+                    f"https://i.instagram.com/api/v1/direct_v2/"
+                    f"threads/{thread_id}/remove_users/",
+                    data={
+                        "user_ids": f"[{remove_user_id}]"
+                    }
+                )
 
-                    if remove_result.get("ok"):
-                        add_gc_log(f"       REMOVED 🗑️ - {remove_username}")
+                add_gc_log(
+                    f"💠Members Added : "
+                    f"{', '.join(usernames)}"
+                )
 
-                time.sleep(1)
-                time.sleep(2)
+                add_gc_log(
+                    f"🧃 Removed : "
+                    f"{remove_username}\n"
+                )
 
                 with gc_creator_lock:
                     job = gc_creator_jobs.get(job_id)
                     if job:
-                        job["done"] = group_number
+                        job["done"] = i
+
+                time.sleep(1)
+
+            except LoginRequired:
+                add_gc_log("🔐 Login expired, relogging...")
+
+                try:
+                    cl = Client()
+                    if proxy:
+                        cl.set_proxy(proxy)
+                    cl.login_by_sessionid(decode_session(session_id))
+                    user_ids = [
+                        cl.user_id_from_username(username)
+                        for username in usernames
+                    ]
+                    remove_user_id = cl.user_id_from_username(remove_username)
+                except Exception:
+                    add_gc_log("❌ Relogin failed")
+                    return
+
+            except RateLimitError:
+                add_gc_log("⏳ Rate limited, cooling down...")
+                time.sleep(2)
 
             except Exception as e:
-                add_gc_log(f"GC {group_number} : CREATION FAILED")
-                add_gc_log(f"       {e}")
+                add_gc_log(f"❌ Error → {e}")
                 time.sleep(2)
+
+        add_gc_log("⚡ GCS DONE")
 
     except Exception as e:
         add_gc_log(f"❌ Error → {e}")
@@ -668,8 +703,8 @@ def gc_creator_worker(job_id, gc_id, group_count, usernames, remove_username, me
 
     finally:
         try:
-            if sock:
-                sock.disconnect()
+            if cl:
+                cl.logout()
         except Exception:
             pass
 
