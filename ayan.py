@@ -1599,6 +1599,124 @@ def bot_worker(acc_id, acc, stop_event):
     bot_status[acc_id]["running"] = False
     bot_status[acc_id]["last_action"] = "Stopped"
 
+
+# ---------------------------------------------------------------------------
+# MULTI-ACCOUNT STABILITY SUPERVISOR
+# ---------------------------------------------------------------------------
+# Each account keeps its own worker thread. If a worker unexpectedly crashes,
+# only that account is restarted; other accounts are never affected.
+def _select_account_worker(acc):
+    method = acc.get("method", "INSTAGRAPI")
+    if method == "AYAN MULTI GC":
+        return ayaan_multi_gc_worker
+    if method == "RAVAN MULTI GC":
+        return ravan_multi_gc_worker
+    if method == "RAVAN":
+        return ravan_worker
+    return bot_worker
+
+
+def supervised_account_worker(acc_id, acc, stop_event):
+    worker = _select_account_worker(acc)
+    crash_count = 0
+
+    while not stop_event.is_set():
+        try:
+            worker(acc_id, acc, stop_event)
+        except Exception as exc:
+            crash_count += 1
+            if stop_event.is_set():
+                break
+
+            # Keep the failure isolated to this account.
+            st = bot_status.setdefault(acc_id, {})
+            st["running"] = False
+            st["last_action"] = f"Worker crashed: {exc}"
+            log(acc_id, f"⚠️ Worker crashed: {type(exc).__name__}: {exc}")
+
+            # Back off so a transient Instagram/network failure cannot create
+            # a tight restart loop.
+            backoff = min(60, 5 * crash_count)
+            st["cooldown"] = True
+            st["cooldown_end"] = time.time() + backoff
+            log(acc_id, f"🔄 Restarting this account in {backoff}s...")
+            for _ in range(backoff):
+                if stop_event.is_set():
+                    break
+                time.sleep(1)
+            st["cooldown"] = False
+            st["cooldown_end"] = 0
+
+            if stop_event.is_set():
+                break
+
+            # Force a fresh client after an unexpected worker crash.
+            try:
+                ig_clients.pop(acc_id, None)
+            except Exception:
+                pass
+
+            st["running"] = True
+            st["started_at"] = time.time()
+            st["reauth_attempted"] = False
+            continue
+
+        # A worker normally returns when it was deliberately stopped or when
+        # it reached a terminal state such as an invalid session. Do not
+        # restart those cases.
+        if stop_event.is_set():
+            break
+
+        st = bot_status.get(acc_id, {})
+        last_action = str(st.get("last_action", "")).lower()
+
+        terminal = (
+            "session expired" in last_action
+            or "login failed" in last_action
+            or "login timed out" in last_action
+            or "reauth required" in last_action
+            or "missing session" in last_action
+            or "stopped" in last_action
+        )
+
+        # Multi workers catch their own top-level exceptions and return.
+        # Restart those only when their status explicitly says it was an error.
+        worker_error = " error" in last_action or "failed:" in last_action
+
+        if terminal and not worker_error:
+            break
+
+        # If a worker returned without being stopped and without a terminal
+        # status, treat it as an unexpected exit and restart that account.
+        if not terminal or worker_error:
+            crash_count += 1
+            st["running"] = False
+            st["last_action"] = "Worker exited unexpectedly"
+            log(acc_id, "⚠️ Worker exited unexpectedly — restarting this account...")
+            try:
+                ig_clients.pop(acc_id, None)
+            except Exception:
+                pass
+
+            backoff = min(60, 5 * crash_count)
+            for _ in range(backoff):
+                if stop_event.is_set():
+                    break
+                time.sleep(1)
+
+            if stop_event.is_set():
+                break
+
+            st["running"] = True
+            st["started_at"] = time.time()
+            st["reauth_attempted"] = False
+            continue
+
+    if acc_id in bot_status:
+        bot_status[acc_id]["running"] = False
+        bot_status[acc_id]["cooldown"] = False
+        bot_status[acc_id]["cooldown_end"] = 0
+
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4280,7 +4398,14 @@ def start_bot(acc_id):
         worker = ravan_multi_gc_worker
     else:
         worker = ravan_worker if method == "RAVAN" else bot_worker
-    t = threading.Thread(target=worker, args=(acc_id, acc, stop_event), daemon=True)
+    # Run every account through its own supervisor. This prevents an
+    # unexpected exception in one account from killing that account permanently.
+    t = threading.Thread(
+        target=supervised_account_worker,
+        args=(acc_id, acc, stop_event),
+        daemon=True,
+        name=f"ig-worker-{acc_id}",
+    )
     bot_threads[acc_id] = t
     t.start()
     return jsonify({"success": True})
